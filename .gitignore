@@ -1,0 +1,24 @@
+# macOS sistemske datoteke
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Audio i Video datoteke (Jako važno!)
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.wav
+*.WAV
+*.mp3
+*.m4a
+
+# Privremene datoteke od skripte
+spajanje.txt
+*temp.wav
+*_synced.wav
+
+# Logovi i arhive
+*.log
+*.zip
+*.tar.gz
