@@ -10,6 +10,37 @@ for cmd in ffmpeg ffprobe afinfo audio-offset-finder; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "❌ '$cmd' nije instaliran!"; exit 1; }
 done
 
+# --- 0b. PROVJERA AI AUDIO OKOLINE (Python 3.11 venv) ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/.venv_resemble"
+VENV_PYTHON="$VENV_DIR/bin/python"
+VENV_FFMPEG_NORM="$VENV_DIR/bin/ffmpeg-normalize"
+ENHANCE_SCRIPT="$SCRIPT_DIR/enhance_audio.py"
+
+setup_ai_venv() {
+  if [[ ! -d "$VENV_DIR" ]]; then
+    echo "🔧 Kreiram Python 3.11 virtualnu okolinu za AI alate..."
+    python3.11 -m venv "$VENV_DIR"
+  fi
+  if [[ ! -f "$VENV_FFMPEG_NORM" ]]; then
+    echo "📦 Instaliram ffmpeg-normalize..."
+    "$VENV_DIR/bin/pip" install --quiet ffmpeg-normalize
+  fi
+  "$VENV_PYTHON" -c "from resemble_enhance.enhancer.inference import enhance" 2>/dev/null || {
+    echo "📦 Instaliram resemble-enhance i torchaudio..."
+    "$VENV_DIR/bin/pip" install --quiet resemble-enhance torchaudio
+  }
+}
+
+if [[ -f "$ENHANCE_SCRIPT" ]]; then
+  setup_ai_venv
+  AI_ENHANCE=true
+  echo "✅ AI audio poboljšavanje: AKTIVNO"
+else
+  AI_ENHANCE=false
+  echo "ℹ️  AI audio poboljšavanje: PRESKOČENO (enhance_audio.py nije pronađen)"
+fi
+
 # --- 1. INICIJALIZACIJA VARIJABLI ---
 RIVERSIDE_WAV=""
 RODE_MIC_WAV=""
@@ -68,9 +99,13 @@ echo "✅ Učitano Lumix datoteka: ${#LUMIX_VIDS[@]}"
 # --- 3c. CLEANUP TRAP (čisti privremene datoteke čak i ako skripta padne) ---
 LUMIX_AUDIO_TEMP="/tmp/lumix_audio_temp.wav"
 CONCAT_TXT="/tmp/spajanje.txt"
+ENHANCED_WAV=""
+NORMALIZED_WAV=""
 SAFE_RODE_MIC=""
 cleanup() {
   rm -f "$LUMIX_AUDIO_TEMP" "$CONCAT_TXT"
+  [[ -n "$ENHANCED_WAV" ]] && rm -f "$ENHANCED_WAV"
+  [[ -n "$NORMALIZED_WAV" ]] && rm -f "$NORMALIZED_WAV"
   [[ -n "$SAFE_RODE_MIC" && "$RODE_MIC_WAV" != "$SAFE_RODE_MIC" ]] && rm -f "$SAFE_RODE_MIC"
 }
 trap cleanup EXIT
@@ -107,6 +142,31 @@ echo "✂️ Režem StereoMix na točnu duljinu..."
 ffmpeg -v warning -ss "$RODE_OFFSET" -i "$RODE_STEREO_WAV" -t "$DURATION" -c copy -y "$SYNCED_STEREO"
 echo "✅ Savršeni audio kreiran: $SYNCED_STEREO"
 
+# --- 7b. AI POBOLJŠAVANJE ZVUKA (resemble-enhance) ---
+if [[ "$AI_ENHANCE" == true ]]; then
+  ENHANCED_WAV="${SYNCED_STEREO%.*}_enhanced.wav"
+  echo "🪄 AI poboljšavanje zvuka (resemble-enhance)..."
+  "$VENV_PYTHON" "$ENHANCE_SCRIPT" "$SYNCED_STEREO" "$ENHANCED_WAV" 0.5
+  echo "✅ AI poboljšani audio: $ENHANCED_WAV"
+
+  # --- 7c. LUFS NORMALIZACIJA (ffmpeg-normalize) ---
+  NORMALIZED_WAV="${SYNCED_STEREO%.*}_final_premium.wav"
+  echo "📊 LUFS normalizacija (-16 LUFS, True Peak -1.0 dB)..."
+  "$VENV_FFMPEG_NORM" "$ENHANCED_WAV" \
+    -t -16 \
+    -tp -1.0 \
+    -ar 48000 \
+    -c:a pcm_s16le \
+    -o "$NORMALIZED_WAV" \
+    -f
+  echo "✅ Streaming-ready audio: $NORMALIZED_WAV"
+
+  # Koristi premium audio za finalno spajanje
+  FINAL_AUDIO="$NORMALIZED_WAV"
+else
+  FINAL_AUDIO="$SYNCED_STEREO"
+fi
+
 # --- 8. EKSTRAKCIJA ZVUKA IZ KAMERE (Samo iz prvog videa) ---
 PRVI_LUMIX="${LUMIX_VIDS[0]}"
 echo "🎵 Izvlačim privremeni zvuk iz prvog Lumix videa..."
@@ -125,6 +185,7 @@ if [ "$DRY_RUN" = true ]; then
     echo "   Audio offset (Rode):      $RODE_OFFSET s"
     echo "   Video offset (Lumix):     $VID_OFFSET s"
     echo "   Synced audio:             $SYNCED_STEREO"
+    echo "   AI poboljšavanje:         $AI_ENHANCE"
     echo "   Lumix datoteke:           ${LUMIX_VIDS[*]}"
     echo "   Output direktorij:        $FINAL_OUT_DIR"
     echo ""
@@ -156,8 +217,14 @@ fi
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 FINAL_VIDEO="$FINAL_OUT_DIR/Podcast_${TIMESTAMP}.mov"
 
-echo "🚀 Spajam konačni video bez renderiranja (Ovo može potrajati)..."
-ffmpeg -v warning -f concat -safe 0 -i "$CONCAT_TXT" -i "$SYNCED_STEREO" -map 0:v -map 1:a -c copy -shortest -y "$FINAL_VIDEO"
+echo "🚀 Spajam konačni video (Ovo može potrajati)..."
+if [[ "$AI_ENHANCE" == true ]]; then
+  # AI audio je 48kHz PCM — treba re-encode audio stream
+  ffmpeg -v warning -f concat -safe 0 -i "$CONCAT_TXT" -i "$FINAL_AUDIO" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 320k -shortest -y "$FINAL_VIDEO"
+else
+  # Originalni audio — stream copy (bez renderiranja)
+  ffmpeg -v warning -f concat -safe 0 -i "$CONCAT_TXT" -i "$FINAL_AUDIO" -map 0:v -map 1:a -c copy -shortest -y "$FINAL_VIDEO"
+fi
 
 echo "🎉 GOTOVO! Tvoj video je spreman na: $FINAL_VIDEO"
 

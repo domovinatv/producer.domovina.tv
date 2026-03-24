@@ -17,6 +17,11 @@
 spajanje.txt
 *temp.wav
 *_synced.wav
+*_enhanced.wav
+*_final_premium.wav
+
+# Python virtualna okolina
+.venv_resemble/
 
 # Swift build artefakti
 .build/
