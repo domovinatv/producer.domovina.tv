@@ -1,8 +1,54 @@
-# Producer: Podcast Audio/Video Sync Tool
+# Producer: Domovina Studio
 
-macOS CLI alat za savršenu sinkronizaciju lokalnog videa i zvuka (Lumix + Rode) s Riverside.fm snimkama, bez potrebe za video renderiranjem. Alat štedi sate montaže spajanjem i preciznim poravnavanjem teških datoteka koristeći zero-render tehnike.
+Open-source podcast studio za macOS. Snima 2× RØDE PodMic USB kao izolirane
+tragove, Lumix GH5 preko Elgato 4K X, s egzaktnim lip syncom i kopijom na
+Cloudflare R2 dok snimanje još traje — vlastita zamjena za Riverside.fm.
 
 Built and used by [Domovina.tv](https://domovina.tv).
+
+---
+
+## 🎙️ Domovina Studio (realtime snimanje)
+
+**→ Puna dokumentacija: [`docs/REALTIME_STUDIO.md`](docs/REALTIME_STUDIO.md)**
+**→ Kako lip sync doista radi (s dijagramima): [`docs/LIP_SYNC_THEORY.md`](docs/LIP_SYNC_THEORY.md)**
+
+Ključna razlika prema svemu ostalom: sync se ne traži korelacijom nakon snimanja.
+CoreAudio i AVFoundation označavaju uzorke istim satom (`mach_absolute_time`), pa
+aplikacija zapiše točno vrijeme prvog uzorka svakog traga. Relativni pomaci su
+egzaktna aritmetika. Korelacija ostaje samo za snimku sa SD kartice kamere, koja
+ima svoj neovisni sat.
+
+| | |
+|---|---|
+| **Izolirani tragovi** | svaki mikrofon sa svog HAL uređaja, 24-bit WAV — bez Aggregate Devicea |
+| **Mjerenje drifta** | uživo po kanalu u ppm, zapisano u manifest, ispravljeno u postu |
+| **Live lip sync meter** | vrijednost iz sata + neovisna korelacija kao provjera |
+| **R2 tijekom snimanja** | segmenti se šalju dok snima; prekid veze samo povećava zaostatak |
+| **Dvostruko snimanje** | SD kartica = master, HDMI capture = sinkroni proxy i backup |
+| **Zdravlje sustava** | disk, mrtvi mikrofon, clipping, USB odspajanje, termika |
+
+```bash
+./scripts/build_app.sh          # .app bundle (potrebno za dopuštenja mic/kamere)
+open "build/Domovina Studio.app"
+
+./scripts/test.sh               # testovi, ne diraju hardver
+```
+
+Nakon snimanja:
+
+```bash
+./scripts/finalize_session.sh \
+  --session "$HOME/Movies/DomovinaStudio/2026-07-25-1930-epizoda-42" \
+  --lumix /Volumes/LUMIX/DCIM/140_PANA/P1400661.MOV
+```
+
+---
+
+## 🛠️ Naslijeđeni tijek: podcast_sync.sh (Riverside.fm)
+
+Za snimke koje su išle preko Riverside.fm. Ostaje u repozitoriju i dostupan je u
+aplikaciji pod tabom **Post → Riverside (naslijeđeno)**.
 
 ## 🛑 The Problem
 Relying 100% on cloud podcast recorders (like Riverside.fm) can be risky due to connection drops or "mic bleed" causing poor track separation. Local recordings are safer and offer better quality, but:
@@ -58,33 +104,36 @@ The script uses named arguments. Order does not matter. You can pass as many `--
 
 All runs are logged to `sync_YYYYMMDD_HHMMSS.log` in the output directory. Temporary files are automatically cleaned up via a `trap`, even if the script fails mid-execution.
 
-## 🖥️ GUI App (Podcast Producer)
+## 🖥️ Aplikacija (Domovina Studio)
 
-A native macOS SwiftUI app that provides a visual interface for selecting files and generating the CLI command. Instead of manually typing long file paths, use the GUI to browse for files and copy the ready-made command to your terminal.
+Native macOS SwiftUI aplikacija s dva taba:
 
-![Podcast Producer GUI](assets/podcast-producer-gui.png)
+* **Studio** — snimanje u realnom vremenu (vidi gore).
+* **Post** — dovršavanje sesije, ili naslijeđeni Riverside tijek.
 
 ### Requirements
 * macOS 14 (Sonoma) or later
 * Xcode or Swift toolchain installed
 
 ### Build & Run
+
 ```bash
-cd PodcastProducer
-swift run
+# Preporučeno: pravi .app bundle, jer macOS dopuštenja za mikrofon i kameru
+# dodjeljuje po bundle identifieru
+./scripts/build_app.sh
+open "build/Domovina Studio.app"
+
+# Razvoj: dopuštenja se pripisuju Terminalu
+cd PodcastProducer && swift run
 ```
 
-Or open in Xcode:
-```bash
-open PodcastProducer/Package.swift
-```
+### Testovi
 
-### Features
-* Native file pickers for audio (`.wav`) and video (`.mov`, `.mp4`) files
-* Drag & drop support for LUMIX video files
-* Auto-detects `podcast_sync.sh` location
-* Generates the full CLI command with `time` supervisor
-* One-click **Copy to Clipboard** — paste into terminal and run
+```bash
+./scripts/test.sh          # sve
+./scripts/test_core.sh     # sat, mjerači, lip sync korelator, manifest
+./scripts/test_sigv4.sh    # R2 potpisivanje protiv AWS test vektora
+```
 
 ## 📝 License
 This project is open-sourced under the MIT License.

@@ -26,3 +26,7 @@ spajanje.txt
 *.log
 *.zip
 *.tar.gz
+
+# Izlaz build_app.sh (.app bundle) i Python venv iz eksperimenata
+build/
+.venv*/

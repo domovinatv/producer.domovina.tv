@@ -1,0 +1,630 @@
+import Foundation
+import SwiftUI
+import AVFoundation
+import Combine
+
+/// Orchestrates a live take: microphones, camera, manifest, health and uploads.
+///
+/// Deliberate ordering on start — microphones first, then video, then the
+/// upload queue. Audio is the one thing a podcast cannot survive losing, so it
+/// is running before anything slower has a chance to fail.
+@MainActor
+final class StudioViewModel: ObservableObject {
+
+    struct MicSlot: Identifiable, Equatable {
+        var id: String
+        var label: String
+        var deviceUID: String?
+    }
+
+    // MARK: - Configuration
+
+    @Published var sessionTitle: String = ""
+    @Published var micSlots: [MicSlot] = [
+        MicSlot(id: "mic-1", label: "Voditelj"),
+        MicSlot(id: "mic-2", label: "Gost")
+    ]
+    @Published var selectedVideoDeviceID: String?
+    @Published var selectedCameraAudioDeviceID: String?
+    @Published var masterCodec: VideoCaptureController.MasterCodec = .hevc
+    @Published var libraryURL: URL = SessionStore.defaultLibraryURL
+    @Published var r2Configuration = R2ConfigurationStore.load()
+    @Published var r2SecretInput: String = ""
+
+    // MARK: - Discovered hardware
+
+    @Published private(set) var availableInputs: [AudioInputDevice] = []
+    @Published private(set) var availableVideoDevices: [AVCaptureDevice] = []
+    @Published private(set) var availableCameraAudioDevices: [AVCaptureDevice] = []
+
+    // MARK: - Live state
+
+    @Published private(set) var isPreviewing = false
+    /// Mirrored into `RecordingGuard` so the AppKit quit handler can see it.
+    @Published private(set) var isRecording = false {
+        didSet { RecordingGuard.shared.isRecording = isRecording }
+    }
+    @Published private(set) var isStopping = false
+    @Published private(set) var elapsedSeconds: Double = 0
+    @Published private(set) var micStatuses: [String: AudioTrackRecorder.Status] = [:]
+    @Published private(set) var videoStatus = VideoCaptureController.Status()
+    @Published private(set) var lipSync = LipSyncMonitor.Reading()
+    @Published private(set) var uploadStats = UploadQueue.Stats()
+    @Published private(set) var health = HealthReport()
+    @Published private(set) var sessionFolderURL: URL?
+    @Published private(set) var recentEvents: [SessionManifest.Event] = []
+    @Published var lastError: String?
+    @Published var r2Status: String?
+
+    let videoController = VideoCaptureController()
+    private let lipSyncMonitor = LipSyncMonitor()
+    private let healthMonitor = HealthMonitor()
+    private let lipSyncQueue = DispatchQueue(label: "tv.domovina.studio.lipsync", qos: .utility)
+
+    private var recorders: [String: AudioTrackRecorder] = [:]
+    private var store: SessionStore?
+    private var uploadQueue: UploadQueue?
+    private var remotePrefix: String = ""
+    private var startHostNanos: UInt64 = 0
+    private var fastTimer: Timer?
+    private var slowTimer: Timer?
+    private var deviceListener: AudioObjectPropertyListenerBlock?
+
+    // MARK: - Lifecycle
+
+    init() {
+        restoreSelections()
+        refreshDevices()
+        startTimers()
+
+        deviceListener = AudioDeviceEnumerator.addDeviceListListener(queue: .main) { [weak self] in
+            Task { @MainActor in self?.handleDeviceListChanged() }
+        }
+    }
+
+    deinit {
+        fastTimer?.invalidate()
+        slowTimer?.invalidate()
+    }
+
+    func refreshDevices() {
+        availableInputs = AudioDeviceEnumerator.inputDevices()
+        availableVideoDevices = VideoCaptureController.videoDevices()
+        availableCameraAudioDevices = VideoCaptureController.audioDevices()
+
+        if selectedVideoDeviceID == nil {
+            // The Elgato is the only external video device in a normal studio.
+            selectedVideoDeviceID = availableVideoDevices.first { $0.localizedName.localizedCaseInsensitiveContains("elgato") }?.uniqueID
+                ?? availableVideoDevices.first?.uniqueID
+        }
+        if selectedCameraAudioDeviceID == nil {
+            selectedCameraAudioDeviceID = availableCameraAudioDevices.first { $0.localizedName.localizedCaseInsensitiveContains("elgato") }?.uniqueID
+        }
+        autoAssignMicrophones()
+    }
+
+    /// Pre-fills the mic slots with anything that looks like a RODE, so a fresh
+    /// machine is one click from recording.
+    private func autoAssignMicrophones() {
+        let candidates = availableInputs.filter {
+            $0.name.localizedCaseInsensitiveContains("rode")
+                || $0.name.localizedCaseInsensitiveContains("røde")
+                || $0.name.localizedCaseInsensitiveContains("podmic")
+        }
+        for (index, slot) in micSlots.enumerated() {
+            guard slot.deviceUID == nil || availableInputs.first(where: { $0.uid == slot.deviceUID }) == nil else { continue }
+            if index < candidates.count {
+                micSlots[index].deviceUID = candidates[index].uid
+            }
+        }
+    }
+
+    private func handleDeviceListChanged() {
+        let previouslyAssigned = Set(micSlots.compactMap(\.deviceUID))
+        refreshDevices()
+        let stillPresent = Set(availableInputs.map(\.uid))
+        let lost = previouslyAssigned.subtracting(stillPresent)
+        for uid in lost {
+            let name = micSlots.first { $0.deviceUID == uid }?.label ?? uid
+            store?.log("Audio uređaj nestao: \(name)", level: isRecording ? .error : .warning)
+            if isRecording { lastError = "⚠️ Mikrofon '\(name)' je nestao iz sustava!" }
+        }
+    }
+
+    // MARK: - Preview
+
+    func startPreview() async {
+        guard let videoDeviceID = selectedVideoDeviceID else {
+            lastError = "Nije odabran video uređaj."
+            return
+        }
+        do {
+            try await VideoCaptureController.requestPermissions()
+            videoController.masterCodec = masterCodec
+            videoController.onMonitorSamples = { [weak self] samples, count, rate, hostNanos in
+                self?.lipSyncMonitor.feedCamera(samples: samples, count: count, sampleRate: rate, hostNanos: hostNanos)
+            }
+            try videoController.startSession(videoDeviceID: videoDeviceID, audioDeviceID: selectedCameraAudioDeviceID)
+            isPreviewing = true
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func stopPreview() {
+        guard !isRecording else { return }
+        videoController.stopSession()
+        isPreviewing = false
+    }
+
+    // MARK: - Recording
+
+    var assignedMicrophones: [(slot: MicSlot, device: AudioInputDevice)] {
+        micSlots.compactMap { slot in
+            guard let uid = slot.deviceUID, let device = availableInputs.first(where: { $0.uid == uid }) else { return nil }
+            return (slot, device)
+        }
+    }
+
+    var estimatedGigabytesPerHour: Double {
+        let audio = Double(assignedMicrophones.count) * 1.1   // continuous + segment copy
+        let video = isPreviewing || isRecording ? masterCodec.approximateGigabytesPerHour : 0
+        return audio + video
+    }
+
+    func startRecording() async {
+        guard !isRecording else { return }
+        guard !assignedMicrophones.isEmpty else {
+            lastError = "Dodijeli barem jedan mikrofon prije snimanja."
+            return
+        }
+
+        // Pre-flight: refuse rather than fail 40 minutes in.
+        let preflight = healthMonitor.evaluate(
+            sessionDirectory: libraryURL,
+            estimatedGigabytesPerHour: estimatedGigabytesPerHour,
+            microphones: [],
+            video: nil,
+            upload: UploadQueue.Stats(),
+            isRecording: false,
+            elapsedSeconds: 0
+        )
+        guard preflight.isSafeToRecord else {
+            lastError = preflight.items.first { $0.severity == .critical }?.detail ?? "Sustav nije spreman."
+            return
+        }
+
+        do {
+            let newStore = try SessionStore(libraryURL: libraryURL, title: sessionTitle)
+            store = newStore
+            sessionFolderURL = newStore.rootURL
+            startHostNanos = HostClock.now()
+            lipSyncMonitor.reset()
+
+            remotePrefix = "\(r2Configuration.prefix)/\(newStore.snapshot().sessionID)"
+            let queue = UploadQueue(
+                journalURL: newStore.rootURL.appendingPathComponent("upload-journal.json"),
+                configuration: r2Configuration
+            )
+            uploadQueue = queue
+
+            newStore.mutate {
+                $0.startedAtHostNanos = self.startHostNanos
+                if self.r2Configuration.isUsable {
+                    $0.remote = .init(provider: "cloudflare-r2", bucket: self.r2Configuration.bucket, prefix: self.remotePrefix)
+                }
+            }
+            newStore.log("Snimanje pokrenuto", level: .info)
+
+            try startMicrophones(store: newStore, queue: queue)
+            startVideo(store: newStore, queue: queue)
+
+            isRecording = true
+            elapsedSeconds = 0
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            await teardownRecorders()
+        }
+    }
+
+    private func startMicrophones(store: SessionStore, queue: UploadQueue) throws {
+        for (index, entry) in assignedMicrophones.enumerated() {
+            let recorder = AudioTrackRecorder(
+                trackID: entry.slot.id,
+                label: entry.slot.label,
+                device: entry.device,
+                audioDirectory: store.audioURL,
+                segmentsDirectory: store.segmentsURL
+            )
+
+            let trackID = entry.slot.id
+            let isPrimary = index == 0
+            let uploadDuringRecording = r2Configuration.uploadDuringRecording
+
+            recorder.onSegmentReady = { [weak self] url, segmentIndex, hostNanos, duration in
+                guard let self else { return }
+                let key = "\(self.remotePrefix)/audio/\(trackID)/\(url.lastPathComponent)"
+                let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)??.intValue ?? 0
+
+                store.mutate { manifest in
+                    guard let trackIndex = manifest.tracks.firstIndex(where: { $0.id == trackID }) else { return }
+                    manifest.tracks[trackIndex].segments.append(
+                        .init(index: segmentIndex,
+                              relativePath: store.relativePath(for: url),
+                              remoteKey: key,
+                              byteCount: size,
+                              startHostNanos: hostNanos,
+                              durationSeconds: duration)
+                    )
+                }
+
+                if uploadDuringRecording {
+                    Task {
+                        // The continuous master stays on disk, so the segment
+                        // copy is disposable once it is safely in R2.
+                        await queue.enqueue(fileURL: url, remoteKey: key, kind: .audioSegment,
+                                            contentType: "audio/wav", deleteLocalAfterUpload: true)
+                    }
+                }
+            }
+
+            if isPrimary {
+                recorder.onMonitorSamples = { [weak self] samples, count, rate, hostNanos in
+                    self?.lipSyncMonitor.feedMicrophone(samples: samples, count: count, sampleRate: rate, hostNanos: hostNanos)
+                }
+            }
+
+            try recorder.start()
+            recorders[entry.slot.id] = recorder
+
+            store.mutate {
+                $0.upsert(track: .init(
+                    id: entry.slot.id,
+                    kind: .microphone,
+                    label: entry.slot.label,
+                    deviceName: entry.device.name,
+                    deviceUID: entry.device.uid,
+                    relativePath: store.relativePath(for: recorder.localFileURL),
+                    sampleRate: entry.device.nominalSampleRate,
+                    channelCount: entry.device.inputChannelCount,
+                    bitDepth: 24
+                ))
+            }
+            store.log("Mikrofon '\(entry.slot.label)' snima s \(entry.device.name)")
+        }
+    }
+
+    private func startVideo(store: SessionStore, queue: UploadQueue) {
+        guard isPreviewing, selectedVideoDeviceID != nil else {
+            store.log("Video nije aktivan — snima se samo audio", level: .warning)
+            return
+        }
+
+        let masterURL = store.videoURL.appendingPathComponent("camera-proxy.mov")
+        let uploadDuringRecording = r2Configuration.uploadDuringRecording
+        let stagingRoot = store.segmentsURL.appendingPathComponent("video", isDirectory: true)
+
+        videoController.onSegmentReady = { [weak self] data, index, hostNanos in
+            guard let self else { return }
+            let name = String(format: "video-%05d.mp4", index)
+            let key = "\(self.remotePrefix)/video/segments/\(name)"
+
+            store.mutate { manifest in
+                guard let trackIndex = manifest.tracks.firstIndex(where: { $0.id == "camera-proxy" }) else { return }
+                manifest.tracks[trackIndex].segments.append(
+                    .init(index: index,
+                          relativePath: "segments/video/\(name)",
+                          remoteKey: key,
+                          byteCount: data.count,
+                          startHostNanos: hostNanos,
+                          durationSeconds: self.videoController.uploadSegmentSeconds)
+                )
+            }
+
+            if uploadDuringRecording {
+                Task {
+                    await queue.enqueue(data: data,
+                                        stagingURL: stagingRoot.appendingPathComponent(name),
+                                        remoteKey: key,
+                                        kind: .videoSegment,
+                                        contentType: "video/mp4",
+                                        deleteLocalAfterUpload: true)
+                }
+            }
+        }
+
+        do {
+            try videoController.startRecording(masterURL: masterURL)
+            let status = videoController.snapshot()
+            store.mutate {
+                $0.upsert(track: .init(
+                    id: "camera-proxy",
+                    kind: .cameraProxyVideo,
+                    label: "Elgato / GH5 proxy",
+                    deviceName: self.availableVideoDevices.first { $0.uniqueID == self.selectedVideoDeviceID }?.localizedName ?? "Elgato",
+                    deviceUID: self.selectedVideoDeviceID,
+                    relativePath: store.relativePath(for: masterURL),
+                    codec: self.masterCodec.rawValue,
+                    width: status.width,
+                    height: status.height,
+                    nominalFrameRate: status.nominalFrameRate
+                ))
+            }
+            store.log("Video snimanje pokrenuto (\(status.width)×\(status.height) @ \(Int(status.nominalFrameRate))fps, \(masterCodec.displayName))")
+        } catch {
+            lastError = error.localizedDescription
+            store.log("Video snimanje NIJE pokrenuto: \(error.localizedDescription)", level: .error)
+        }
+    }
+
+    func stopRecording() async {
+        guard isRecording, !isStopping else { return }
+        isStopping = true
+        defer { isStopping = false }
+
+        let store = self.store
+        let stopHostNanos = HostClock.now()
+
+        await teardownRecorders()
+
+        store?.mutate { $0.stoppedAtHostNanos = stopHostNanos }
+        store?.log("Snimanje zaustavljeno")
+        writeFinalTrackStatistics()
+        store?.saveNow()
+
+        isRecording = false
+
+        if let store, r2Configuration.isUsable {
+            await uploadFinalArtifacts(store: store)
+        }
+    }
+
+    private func teardownRecorders() async {
+        for recorder in recorders.values { recorder.stop() }
+        await videoController.stopRecording()
+        recorders.removeAll()
+    }
+
+    /// Freezes the measured drift and sample counts into the manifest — the
+    /// numbers post-production needs to resample each mic onto one timeline.
+    private func writeFinalTrackStatistics() {
+        guard let store else { return }
+        let snapshots = recorderSnapshots
+        let videoSnapshot = videoController.snapshot()
+
+        store.mutate { manifest in
+            for (trackID, status) in snapshots {
+                guard let index = manifest.tracks.firstIndex(where: { $0.id == trackID }) else { continue }
+                manifest.tracks[index].firstSampleHostNanos = status.firstSampleHostNanos
+                manifest.tracks[index].sampleCount = status.frameCount
+                manifest.tracks[index].measuredSampleRate = status.measuredSampleRate
+                manifest.tracks[index].driftPPM = status.driftPPM
+                manifest.tracks[index].clipCount = status.levels.clipCount
+            }
+            if let index = manifest.tracks.firstIndex(where: { $0.id == "camera-proxy" }) {
+                manifest.tracks[index].firstSampleHostNanos = videoSnapshot.firstVideoHostNanos
+                manifest.tracks[index].lastSampleHostNanos = videoSnapshot.lastVideoHostNanos
+                manifest.tracks[index].sampleCount = videoSnapshot.videoFrameCount
+            }
+        }
+    }
+
+    private var recorderSnapshots: [String: AudioTrackRecorder.Status] {
+        var result: [String: AudioTrackRecorder.Status] = [:]
+        for (id, recorder) in recorders { result[id] = recorder.snapshot() }
+        return result
+    }
+
+    private func uploadFinalArtifacts(store: SessionStore) async {
+        guard let queue = uploadQueue else { return }
+
+        await queue.enqueue(fileURL: store.manifestURL,
+                            remoteKey: "\(remotePrefix)/manifest.json",
+                            kind: .manifest,
+                            contentType: "application/json",
+                            deleteLocalAfterUpload: false)
+
+        if r2Configuration.uploadMastersAfterStop {
+            for track in store.snapshot().tracks {
+                let localURL = store.rootURL.appendingPathComponent(track.relativePath)
+                guard FileManager.default.fileExists(atPath: localURL.path) else { continue }
+                let contentType = track.kind == .cameraProxyVideo ? "video/quicktime" : "audio/wav"
+                await queue.enqueue(fileURL: localURL,
+                                    remoteKey: "\(remotePrefix)/masters/\(localURL.lastPathComponent)",
+                                    kind: .master,
+                                    contentType: contentType,
+                                    deleteLocalAfterUpload: false)
+            }
+        }
+
+        // Don't block the UI on this — masters can take a long time on a normal
+        // upload link. The session log gets an honest entry either way, so you
+        // can tell "off-site" from "still going" after the fact.
+        Task.detached { [weak self] in
+            let drained = await queue.waitUntilDrained(timeout: 6 * 3600)
+            let stats = await queue.currentStats()
+            guard let model = self else { return }
+            await model.recordUploadOutcome(drained: drained, stats: stats)
+        }
+    }
+
+    private func recordUploadOutcome(drained: Bool, stats: UploadQueue.Stats) {
+        if drained && stats.failed == 0 {
+            store?.log("Sve je poslano na Cloudflare R2 (\(stats.done) objekata)")
+        } else {
+            store?.log(
+                "R2 upload nije dovršen: \(stats.failed) neuspješnih, \(stats.pending + stats.uploading) preostalo",
+                level: .warning
+            )
+        }
+        store?.saveNow()
+    }
+
+    // MARK: - Markers
+
+    func addMarker(_ text: String) {
+        store?.log(text, level: .info, isMarker: true)
+    }
+
+    func retryFailedUploads() async {
+        await uploadQueue?.retryFailed()
+    }
+
+    // MARK: - Timers
+
+    private func startTimers() {
+        fastTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickFast() }
+        }
+        slowTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.tickSlow() }
+        }
+    }
+
+    private func tickFast() {
+        micStatuses = recorderSnapshots
+        videoStatus = videoController.snapshot()
+        if isRecording {
+            elapsedSeconds = Double(HostClock.now() - startHostNanos) / 1_000_000_000.0
+        }
+    }
+
+    private func tickSlow() async {
+        // Correlation runs off the main thread; the result is read next tick.
+        lipSyncQueue.async { [lipSyncMonitor] in lipSyncMonitor.recompute() }
+        lipSync = lipSyncMonitor.snapshot()
+
+        if let queue = uploadQueue {
+            uploadStats = await queue.currentStats()
+        }
+
+        let microphones = micSlots.compactMap { slot -> (label: String, levels: LevelMeter.Reading, isRunning: Bool)? in
+            guard slot.deviceUID != nil else { return nil }
+            guard let status = micStatuses[slot.id] else {
+                return isRecording ? (slot.label, LevelMeter.Reading(), false) : nil
+            }
+            return (slot.label, status.levels, status.isRunning)
+        }
+
+        health = healthMonitor.evaluate(
+            sessionDirectory: sessionFolderURL ?? libraryURL,
+            estimatedGigabytesPerHour: estimatedGigabytesPerHour,
+            microphones: microphones,
+            video: isPreviewing ? videoStatus : nil,
+            upload: uploadStats,
+            isRecording: isRecording,
+            elapsedSeconds: elapsedSeconds
+        )
+
+        if let store {
+            recentEvents = Array(store.snapshot().events.suffix(40).reversed())
+        }
+    }
+
+    // MARK: - R2 settings
+
+    func saveR2Configuration() {
+        R2ConfigurationStore.save(r2Configuration)
+        if !r2SecretInput.isEmpty {
+            R2ConfigurationStore.saveSecret(r2SecretInput, forAccessKeyID: r2Configuration.accessKeyID)
+            r2SecretInput = ""
+        }
+        persistSelections()
+    }
+
+    func verifyR2Access() async {
+        r2Status = "Provjeravam…"
+        do {
+            let client = try R2Client(configuration: r2Configuration)
+            try await client.verifyAccess()
+            r2Status = "✅ Veza s R2 radi (bucket: \(r2Configuration.bucket))"
+        } catch {
+            r2Status = "❌ \(error.localizedDescription)"
+        }
+    }
+
+    var hasStoredR2Secret: Bool {
+        R2ConfigurationStore.hasSecret(forAccessKeyID: r2Configuration.accessKeyID)
+    }
+
+    // MARK: - Selection persistence
+
+    private func persistSelections() {
+        let defaults = UserDefaults.standard
+        defaults.set(selectedVideoDeviceID, forKey: "studio.videoDevice")
+        defaults.set(selectedCameraAudioDeviceID, forKey: "studio.cameraAudioDevice")
+        defaults.set(masterCodec.rawValue, forKey: "studio.masterCodec")
+        defaults.set(libraryURL.path, forKey: "studio.library")
+        let encoded = micSlots.map { ["id": $0.id, "label": $0.label, "uid": $0.deviceUID ?? ""] }
+        defaults.set(encoded, forKey: "studio.micSlots")
+    }
+
+    private func restoreSelections() {
+        let defaults = UserDefaults.standard
+        selectedVideoDeviceID = defaults.string(forKey: "studio.videoDevice")
+        selectedCameraAudioDeviceID = defaults.string(forKey: "studio.cameraAudioDevice")
+        if let raw = defaults.string(forKey: "studio.masterCodec"),
+           let codec = VideoCaptureController.MasterCodec(rawValue: raw) {
+            masterCodec = codec
+        }
+        if let path = defaults.string(forKey: "studio.library"), !path.isEmpty {
+            libraryURL = URL(fileURLWithPath: path)
+        }
+        if let stored = defaults.array(forKey: "studio.micSlots") as? [[String: String]], !stored.isEmpty {
+            micSlots = stored.map {
+                MicSlot(id: $0["id"] ?? UUID().uuidString,
+                        label: $0["label"] ?? "Mikrofon",
+                        deviceUID: ($0["uid"]?.isEmpty ?? true) ? nil : $0["uid"])
+            }
+        }
+    }
+
+    func commitSelections() { persistSelections() }
+
+    func addMicSlot() {
+        micSlots.append(MicSlot(id: "mic-\(micSlots.count + 1)", label: "Mikrofon \(micSlots.count + 1)"))
+    }
+
+    func removeMicSlot(id: String) {
+        guard !isRecording else { return }
+        micSlots.removeAll { $0.id == id }
+    }
+
+    // MARK: - Post-production hand-off
+
+    /// The exact command to run once the GH5's SD card is plugged in.
+    func finalizeCommand(lumixFiles: [String]) -> String? {
+        guard let folder = sessionFolderURL else { return nil }
+        let scriptPath = ScriptLocator.finalizeScriptPath() ?? "./scripts/finalize_session.sh"
+        var parts = ["time", scriptPath, "\\\n  --session", "\"\(folder.path)\""]
+        for file in lumixFiles {
+            parts.append(contentsOf: ["\\\n  --lumix", "\"\(file)\""])
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
+enum ScriptLocator {
+
+    static func finalizeScriptPath() -> String? {
+        candidates(named: "scripts/finalize_session.sh").first
+    }
+
+    static func syncScriptPath() -> String? {
+        candidates(named: "podcast_sync.sh").first
+    }
+
+    private static func candidates(named relativePath: String) -> [String] {
+        let cwd = FileManager.default.currentDirectoryPath
+        let possibilities = [
+            "\(cwd)/\(relativePath)",
+            "\(cwd)/../\(relativePath)",
+            "\(NSHomeDirectory())/git/domovinatv/producer.domovina.tv/\(relativePath)"
+        ]
+        return possibilities
+            .map { ($0 as NSString).standardizingPath }
+            .filter { FileManager.default.fileExists(atPath: $0) }
+    }
+}
