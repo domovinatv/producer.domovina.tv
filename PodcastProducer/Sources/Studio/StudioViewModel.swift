@@ -68,6 +68,7 @@ final class StudioViewModel: ObservableObject {
     private var startHostNanos: UInt64 = 0
     private var monitorErrors: [String] = []
     private var syncSampleTick = 0
+    private var driftSampleTick = 0
     private var fastTimer: Timer?
     private var slowTimer: Timer?
     private var deviceListener: AudioObjectPropertyListenerBlock?
@@ -622,6 +623,19 @@ final class StudioViewModel: ObservableObject {
         }
     }
 
+    private func recordDriftSamples(store: SessionStore) {
+        let snapshots = recorderSnapshots
+        store.mutate { manifest in
+            for (trackID, status) in snapshots {
+                guard let hostNanos = status.lastBufferHostNanos, status.frameCount > 0,
+                      let index = manifest.tracks.firstIndex(where: { $0.id == trackID }) else { continue }
+                manifest.tracks[index].driftSamples.append(
+                    .init(hostNanos: hostNanos, frameCount: status.frameCount)
+                )
+            }
+        }
+    }
+
     /// Persists the measured microphone→picture offset every few seconds.
     ///
     /// Without this the correlator is only a light on the dashboard: the host
@@ -631,6 +645,15 @@ final class StudioViewModel: ObservableObject {
     /// minutes.
     private func recordSyncMeasurementIfDue() {
         guard isRecording, let store else { return }
+
+        // Drift trajectory: one point per 30 s is plenty to characterise a
+        // crystal, and keeps the manifest small on a 3-hour take (360 points).
+        // Counted separately from the sync tick, which resets.
+        driftSampleTick += 1
+        if driftSampleTick >= 30 {
+            driftSampleTick = 0
+            recordDriftSamples(store: store)
+        }
 
         syncSampleTick += 1
         guard syncSampleTick >= 5 else { return }   // tickSlow runs at 1 Hz

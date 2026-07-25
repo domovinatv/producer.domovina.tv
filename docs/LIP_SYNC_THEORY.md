@@ -227,11 +227,11 @@ percepcije — vjerojatno neprimjetno u razgovoru, ali nije nula.
 
 ```mermaid
 flowchart LR
-    subgraph BAD["Jedan globalni odnos (što aplikacija sada radi)"]
+    subgraph BAD["Jedan globalni odnos (za kratke snimke)"]
         B1["Izmjeri prosječni drift<br/>kroz cijelu snimku"] --> B2["Jedan asetrate<br/>za cijeli trag"] --> B3["Rezidual 10–30 ms<br/>na krajevima"]
     end
 
-    subgraph GOOD["Trajektorija drifta (što treba dodati)"]
+    subgraph GOOD["Trajektorija drifta (implementirano)"]
         G1["Zapiši drift<br/>svakih 30 s u manifest"] --> G2["Po dijelovima<br/>linearni resample"] --> G3["Rezidual pod 5 ms<br/>kroz cijelu snimku"]
     end
 
@@ -278,7 +278,9 @@ flowchart TD
 `-itsscale` je ključan detalj: mijenja samo vremenske oznake, ne dira ni jedan
 frame, pa ostaje zero-render filozofija cijelog projekta.
 
-**Ovo još nije implementirano.** Trenutna skripta korelira jednom, na početku.
+**Implementirano.** Skripta korelira na početku i na 85 % snimke, provjeri je li
+rezultat u realnom rasponu (< 500 ppm) i score dovoljan, pa primijeni `-itsscale`.
+Za snimke kraće od 7 minuta preskače — drift je tada zanemariv.
 
 ---
 
@@ -294,8 +296,9 @@ frame, pa ostaje zero-render filozofija cijelog projekta.
 | Vremenski niz izmjerenog pomaka u manifest | ✅ uzorak svakih 5 s, samo pouzdani |
 | **Primjena izmjerenog pomaka na miks** | ✅ medijan, dodan na host-clock pomak |
 | Detekcija „šeta li pomak kroz snimku" | ✅ prva vs druga polovina, upozorenje > 25 ms |
-| **Trajektorija drifta mikrofona (svakih 30 s)** | ❌ treba dodati |
-| **Ispravak drifta SD mastera (`-itsscale`)** | ❌ treba dodati |
+| Trajektorija drifta mikrofona (svakih 30 s) | ✅ u manifestu |
+| Ispravak drifta mikrofona po dijelovima | ✅ ako odstupanje od pravca > 8 ms |
+| Ispravak drifta SD mastera (`-itsscale`) | ✅ korelacija na dva mjesta |
 | **Kalibracijska konstanta iz pljesak-testa** | ❌ treba dodati |
 
 ### Kako se pomak primjenjuje

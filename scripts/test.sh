@@ -6,7 +6,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATUS=0
 
-for suite in test_core.sh test_sigv4.sh test_recover.sh; do
+for suite in test_core.sh test_sigv4.sh test_recover.sh test_finalize.sh; do
     echo "───────────────────────────────────────────"
     echo "▶ $suite"
     echo "───────────────────────────────────────────"

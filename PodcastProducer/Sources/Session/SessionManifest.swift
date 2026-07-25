@@ -95,6 +95,14 @@ struct SessionManifest: Codable {
         /// Chunks handed to the uploader, in order.
         var segments: [Segment] = []
 
+        /// The device's drift trajectory: how many frames it had delivered by each
+        /// host time. A single ratio fitted over the whole take only makes the
+        /// total duration right; if the crystal walks as the mic warms up, the
+        /// middle of a long take stays wrong. These points let post correct
+        /// piecewise instead — and, more importantly, let it *see* whether the
+        /// drift was linear at all.
+        var driftSamples: [DriftSample] = []
+
         var clipCount: Int = 0
         var notes: String?
 
@@ -122,6 +130,12 @@ struct SessionManifest: Codable {
         /// fMP4 only: the chunk carrying the moov box. Must come first when
         /// reassembling, otherwise nothing decodes.
         var isInitialization: Bool = false
+    }
+
+    struct DriftSample: Codable {
+        var hostNanos: UInt64
+        /// Frames delivered strictly before `hostNanos`.
+        var frameCount: UInt64
     }
 
     struct SyncSample: Codable {

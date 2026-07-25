@@ -12,6 +12,7 @@ Built and used by [Domovina.tv](https://domovina.tv).
 
 **→ Puna dokumentacija: [`docs/REALTIME_STUDIO.md`](docs/REALTIME_STUDIO.md)**
 **→ Kako lip sync doista radi (s dijagramima): [`docs/LIP_SYNC_THEORY.md`](docs/LIP_SYNC_THEORY.md)**
+**→ Izmjereni brojevi, pronađeni bugovi, otvorene pretpostavke: [`docs/LESSONS.md`](docs/LESSONS.md)**
 
 Ključna razlika prema svemu ostalom: sync se ne traži korelacijom nakon snimanja.
 CoreAudio i AVFoundation označavaju uzorke istim satom (`mach_absolute_time`), pa
@@ -135,6 +136,7 @@ cd PodcastProducer && swift run
 ./scripts/test_core.sh     # sat, mjerači, lip sync korelator, manifest
 ./scripts/test_sigv4.sh    # R2 potpisivanje protiv AWS test vektora
 ./scripts/test_recover.sh  # oporavak sesije: spajanje fMP4 i WAV segmenata
+./scripts/test_finalize.sh # poravnavanje i drift, točnost do uzorka
 ```
 
 ## 📝 License

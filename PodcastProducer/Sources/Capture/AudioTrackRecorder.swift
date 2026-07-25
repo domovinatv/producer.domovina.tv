@@ -34,6 +34,10 @@ final class AudioTrackRecorder {
         var isRunning = false
         var frameCount: UInt64 = 0
         var firstSampleHostNanos: UInt64?
+        /// Host time of the most recent buffer. Paired with `frameCount` this is
+        /// one point on the device's drift trajectory — sampled periodically it
+        /// shows whether the crystal error is linear or walks as the mic warms up.
+        var lastBufferHostNanos: UInt64?
         var measuredSampleRate: Double?
         var driftPPM: Double?
         var levels = LevelMeter.Reading()
@@ -215,6 +219,9 @@ final class AudioTrackRecorder {
                 status.driftPPM = (measured / sampleRate - 1.0) * 1_000_000.0
             }
         }
+        // Recorded before the increment, so (lastBufferHostNanos, frameCount) is a
+        // consistent pair: frames delivered strictly before that host time.
+        status.lastBufferHostNanos = bufferHostNanos
         status.frameCount &+= UInt64(frameLength)
         status.levels = meter.snapshot()
         stateLock.unlock()

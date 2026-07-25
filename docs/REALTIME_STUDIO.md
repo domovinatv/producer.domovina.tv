@@ -305,22 +305,30 @@ Napisano i testirano bez priključenih mikrofona i kamere. Provjereno je:
 * cijeli `finalize_session.sh` na sintetičkoj sesiji — poravnanje točno do
   milisekunde, SD offset od 10,000 s pronađen egzaktno.
 
-### Poznate rupe (prije epizode od 180 minuta)
+### Duge epizode (180 minuta) — pokriveno
 
-Detaljno objašnjeno u [`LIP_SYNC_THEORY.md`](LIP_SYNC_THEORY.md):
+Oba mehanizma koja se vide samo na dugim snimkama su implementirana:
 
-1. **Drift mikrofona se zapisuje kao jedan globalni odnos**, a termalna komponenta
-   je nelinearna → rezidual 10–30 ms na krajevima duge snimke. Treba zapisivati
-   trajektoriju drifta svakih 30 s i ispravljati po dijelovima. (Pomak
-   mikrofon→slika se **već** bilježi kroz vrijeme i skripta javlja ako šeta.)
-2. **`finalize_session.sh` korelira SD master samo na početku.** Kamerin sat drifta
-   kroz snimku, pa na 180 min kraj epizode može biti do ~324 ms van syncа. Treba
-   korelirati na dva mjesta i primijeniti `ffmpeg -itsscale` (skalira timestampove
-   bez renderiranja).
-3. **Jednokratna kalibracija pljeskom** još nije podržana kao konstanta u
-   postavkama.
+1. **Drift mikrofona po dijelovima.** Trajektorija se zapisuje svakih 30 s. Skripta
+   izmjeri koliko trajektorija odstupa od pravca; ako je preko 8 ms, resamplira po
+   dijelovima od ~10 minuta umjesto jednim odnosom. Odstupanje raste s duljinom:
+   1,9 ms na 10 min, 10,5 ms na 60 min, **31,1 ms na 180 min** — prijelaz je oko
+   50 minuta.
+2. **Drift kamerinog sata.** SD snimka se korelira na dva mjesta (početak i 85 %),
+   iz razlike se izračuna odnos i primijeni `ffmpeg -itsscale` — skalira samo
+   timestampove, ni jedan frame se ne renderira. Bez toga kraj epizode od 180 min
+   može biti do ~324 ms van syncа.
 
-Za snimke do ~30 minuta ništa od ovoga se ne vidi. Za 180 minuta se vidi.
+Sve granice su u **uzorcima**, ne u sekundama, i svaki dio se reže na točan
+očekivani broj uzoraka — jer `aresample` inače doda 1–2 ms na kraj svakog dijela, a
+na 18 dijelova to je 20–35 ms akumulirane greške, dakle upravo onoliko koliko
+ispravak treba ukloniti.
+
+Provjereno na sintetičkoj sesiji: poravnani tragovi su točni **do uzorka** (0,00 ms)
+u obje putanje.
+
+Ostaje nepodržano: kalibracijska konstanta iz jednokratnog pljesak-testa
+(vidi [`LIP_SYNC_THEORY.md`](LIP_SYNC_THEORY.md)).
 
 ### Što se MORA provjeriti na pravom hardveru
 
