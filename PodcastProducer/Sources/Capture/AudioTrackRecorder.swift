@@ -67,6 +67,7 @@ final class AudioTrackRecorder {
     private var segmentFrameCount: AVAudioFramePosition = 0
     private var segmentStartHostNanos: UInt64 = 0
     private var fileSettings: [String: Any] = [:]
+    private var writesToDisk = true
 
     private var status = Status()
 
@@ -91,8 +92,14 @@ final class AudioTrackRecorder {
 
     // MARK: - Lifecycle
 
-    func start() throws {
-        try FileManager.default.createDirectory(at: segmentsDirectory, withIntermediateDirectories: true)
+    /// `writesToDisk: false` gives metering and lip-sync correlation without
+    /// creating any files — used before a take, so you can see levels and pick
+    /// the right device before committing to a recording.
+    func start(writesToDisk: Bool = true) throws {
+        self.writesToDisk = writesToDisk
+        if writesToDisk {
+            try FileManager.default.createDirectory(at: segmentsDirectory, withIntermediateDirectories: true)
+        }
 
         // Bind this engine instance to one specific HAL device. Touching
         // `inputNode` is what instantiates the underlying AUHAL unit, so the
@@ -124,12 +131,14 @@ final class AudioTrackRecorder {
             AVLinearPCMIsNonInterleaved: false
         ]
 
-        continuousFile = try AVAudioFile(
-            forWriting: continuousURL,
-            settings: fileSettings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false
-        )
+        if writesToDisk {
+            continuousFile = try AVAudioFile(
+                forWriting: continuousURL,
+                settings: fileSettings,
+                commonFormat: .pcmFormatFloat32,
+                interleaved: false
+            )
+        }
 
         meter.reset()
         stateLock.lock()
@@ -176,10 +185,17 @@ final class AudioTrackRecorder {
             ? HostClock.nanos(fromHostTime: time.hostTime)
             : HostClock.now()
 
-        meter.process(samples: channelData[0], count: frameLength, sampleRate: sampleRate)
+        meter.process(
+            channelData: channelData,
+            channelCount: Int(buffer.format.channelCount),
+            frameCount: frameLength,
+            sampleRate: sampleRate
+        )
         onMonitorSamples?(channelData[0], frameLength, sampleRate, bufferHostNanos)
 
-        guard let copy = AudioTrackRecorder.copy(buffer: buffer) else { return }
+        // Copy only when there is a file to write to — monitor mode does no
+        // allocation on the capture path at all.
+        let copy = writesToDisk ? AudioTrackRecorder.copy(buffer: buffer) : nil
 
         stateLock.lock()
         if status.firstSampleHostNanos == nil {
@@ -203,6 +219,7 @@ final class AudioTrackRecorder {
         status.levels = meter.snapshot()
         stateLock.unlock()
 
+        guard let copy else { return }
         writerQueue.async { [weak self] in
             self?.write(copy, hostNanos: bufferHostNanos, sampleRate: sampleRate)
         }

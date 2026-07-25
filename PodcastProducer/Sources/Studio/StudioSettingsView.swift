@@ -54,9 +54,26 @@ struct StudioSettingsView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Label("Mikrofoni", systemImage: "mic")
                     .font(.headline)
-                Text("Svaki mikrofon se snima sa svog CoreAudio uređaja, u zaseban 24-bit WAV. Namjerno se ne koristi Aggregate Device — tako svaki mikrofon zadržava svoj clock, a odstupanje se mjeri i zapisuje u manifest.")
+                Text("Svaki slot se snima sa svog CoreAudio uređaja, u zaseban 24-bit WAV.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Dvije moguće postave:")
+                        .font(.caption.weight(.semibold))
+                    Text("**Direktno** — po jedan PodMic USB u svaki slot. Sirovi izolirani tragovi; svaki mikrofon ima svoj clock pa se drift mjeri i zapisuje u manifest. Namjerno bez Aggregate Devicea.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("**RØDE Connect** — jedan slot na virtualni uređaj. Prelijevanje glasova, gate i miks radi RØDE, sync se svodi na jednu korelaciju prema kameri. Ali dobiješ već obrađen miks, ne sirove tragove — za izolirane snimaj i u RØDE Connectu.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("⚠️ „RØDE Connect System\" je zvuk sustava, ne mikrofoni. Uključi Pregled i govori — mjerač pokazuje koji je ulaz pravi.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                .padding(10)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 ForEach($model.micSlots) { $slot in
                     HStack(spacing: 8) {

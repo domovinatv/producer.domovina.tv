@@ -66,6 +66,7 @@ final class StudioViewModel: ObservableObject {
     private var uploadQueue: UploadQueue?
     private var remotePrefix: String = ""
     private var startHostNanos: UInt64 = 0
+    private var monitorErrors: [String] = []
     private var syncSampleTick = 0
     private var fastTimer: Timer?
     private var slowTimer: Timer?
@@ -104,20 +105,48 @@ final class StudioViewModel: ObservableObject {
         autoAssignMicrophones()
     }
 
-    /// Pre-fills the mic slots with anything that looks like a RODE, so a fresh
-    /// machine is one click from recording.
+    /// Pre-fills the mic slots so a fresh machine is close to ready.
+    ///
+    /// Two topologies are possible and they need opposite treatment:
+    ///
+    /// * **Direct** — each PodMic USB is its own HAL device. One slot per mic,
+    ///   isolated tracks, two clock domains to measure.
+    /// * **RØDE Connect** — the app aggregates the mics itself and exposes
+    ///   *virtual* devices. Then there is only ONE thing to capture, and filling
+    ///   a second slot with another virtual device would record the wrong source
+    ///   twice. `RØDE Connect System` in particular is system audio capture, not
+    ///   microphones — assigning it would silently record whatever the Mac plays.
     private func autoAssignMicrophones() {
-        let candidates = availableInputs.filter {
-            $0.name.localizedCaseInsensitiveContains("rode")
-                || $0.name.localizedCaseInsensitiveContains("røde")
-                || $0.name.localizedCaseInsensitiveContains("podmic")
+        let physical = availableInputs.filter {
+            $0.name.localizedCaseInsensitiveContains("podmic")
+                && !$0.name.localizedCaseInsensitiveContains("connect")
         }
+
+        let candidates: [AudioInputDevice]
+        if !physical.isEmpty {
+            candidates = physical
+        } else {
+            // Virtual RØDE devices: never the system-audio one, and only one slot.
+            let virtualMix = availableInputs.filter {
+                ($0.name.localizedCaseInsensitiveContains("rode") || $0.name.localizedCaseInsensitiveContains("røde"))
+                    && !$0.name.localizedCaseInsensitiveContains("system")
+            }
+            candidates = Array(virtualMix.prefix(1))
+        }
+
         for (index, slot) in micSlots.enumerated() {
             guard slot.deviceUID == nil || availableInputs.first(where: { $0.uid == slot.deviceUID }) == nil else { continue }
-            if index < candidates.count {
-                micSlots[index].deviceUID = candidates[index].uid
-            }
+            micSlots[index].deviceUID = index < candidates.count ? candidates[index].uid : nil
         }
+    }
+
+    /// True when the assigned inputs are RØDE Connect virtual devices rather than
+    /// the microphones themselves. Worth surfacing, because it changes what you
+    /// get: one already-processed mix instead of isolated raw tracks.
+    var isUsingAggregatedVirtualInput: Bool {
+        let assigned = assignedMicrophones.map(\.device)
+        guard !assigned.isEmpty else { return false }
+        return assigned.allSatisfy { $0.name.localizedCaseInsensitiveContains("connect") }
     }
 
     private func handleDeviceListChanged() {
@@ -134,20 +163,28 @@ final class StudioViewModel: ObservableObject {
 
     // MARK: - Preview
 
+    /// Brings up metering and video preview without writing anything.
+    ///
+    /// Audio monitoring is not optional here: with RØDE Connect installed there
+    /// are three similarly named virtual devices and no way to tell which one
+    /// carries the microphones except by watching a level meter while talking.
+    /// Requiring a recording to find that out would be absurd.
     func startPreview() async {
-        guard let videoDeviceID = selectedVideoDeviceID else {
-            lastError = "Nije odabran video uređaj."
-            return
-        }
         do {
             try await VideoCaptureController.requestPermissions()
-            videoController.masterCodec = masterCodec
-            videoController.onMonitorSamples = { [weak self] samples, count, rate, hostNanos in
-                self?.lipSyncMonitor.feedCamera(samples: samples, count: count, sampleRate: rate, hostNanos: hostNanos)
+
+            startAudioMonitors()
+
+            if let videoDeviceID = selectedVideoDeviceID {
+                videoController.masterCodec = masterCodec
+                videoController.onMonitorSamples = { [weak self] samples, count, rate, hostNanos in
+                    self?.lipSyncMonitor.feedCamera(samples: samples, count: count, sampleRate: rate, hostNanos: hostNanos)
+                }
+                try videoController.startSession(videoDeviceID: videoDeviceID, audioDeviceID: selectedCameraAudioDeviceID)
             }
-            try videoController.startSession(videoDeviceID: videoDeviceID, audioDeviceID: selectedCameraAudioDeviceID)
+
             isPreviewing = true
-            lastError = nil
+            lastError = monitorErrors.isEmpty ? nil : monitorErrors.joined(separator: "\n")
         } catch {
             lastError = error.localizedDescription
         }
@@ -155,8 +192,42 @@ final class StudioViewModel: ObservableObject {
 
     func stopPreview() {
         guard !isRecording else { return }
+        stopAudioMonitors()
         videoController.stopSession()
         isPreviewing = false
+    }
+
+    private func startAudioMonitors() {
+        stopAudioMonitors()
+        monitorErrors = []
+        lipSyncMonitor.reset()
+
+        for (index, entry) in assignedMicrophones.enumerated() {
+            let recorder = AudioTrackRecorder(
+                trackID: entry.slot.id,
+                label: entry.slot.label,
+                device: entry.device,
+                audioDirectory: FileManager.default.temporaryDirectory,
+                segmentsDirectory: FileManager.default.temporaryDirectory
+            )
+            if index == 0 {
+                recorder.onMonitorSamples = { [weak self] samples, count, rate, hostNanos in
+                    self?.lipSyncMonitor.feedMicrophone(samples: samples, count: count, sampleRate: rate, hostNanos: hostNanos)
+                }
+            }
+            do {
+                try recorder.start(writesToDisk: false)
+                recorders[entry.slot.id] = recorder
+            } catch {
+                monitorErrors.append("\(entry.slot.label): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func stopAudioMonitors() {
+        for recorder in recorders.values { recorder.stop() }
+        recorders.removeAll()
+        micStatuses = [:]
     }
 
     // MARK: - Recording
@@ -231,6 +302,11 @@ final class StudioViewModel: ObservableObject {
     }
 
     private func startMicrophones(store: SessionStore, queue: UploadQueue) throws {
+        // Monitors hold the same HAL devices with file writing switched off —
+        // they must be released before the real recorders take over, or they
+        // would be orphaned in the recorders dictionary and keep running.
+        stopAudioMonitors()
+
         for (index, entry) in assignedMicrophones.enumerated() {
             let recorder = AudioTrackRecorder(
                 trackID: entry.slot.id,

@@ -150,9 +150,27 @@ struct StudioView: View {
             }
 
             if model.assignedMicrophones.isEmpty {
-                Text("Nijedan mikrofon nije dodijeljen. Otvori postavke i odaberi RODE PodMic USB uređaje.")
+                Text("Nijedan mikrofon nije dodijeljen. Otvori postavke i odaberi ulaze.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            } else if model.isUsingAggregatedVirtualInput {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.blue)
+                        .font(.caption)
+                    Text("Snima se RØDE Connect miks — jedan trag, obrada je već ukuhana. Za izolirane sirove tragove snimaj u RØDE Connectu paralelno ili dodijeli PodMic uređaje direktno.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(8)
+                .background(Color.blue.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            if !model.isRecording && !model.isPreviewing && !model.assignedMicrophones.isEmpty {
+                Text("Uključi Pregled da vidiš razine — tako provjeriš da je odabran pravi ulaz.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
 
             ForEach(model.micSlots) { slot in

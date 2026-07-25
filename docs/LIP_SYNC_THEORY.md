@@ -330,6 +330,81 @@ globalni ispravak nije dovoljan.
 
 ---
 
+## 7b. Dvije postave mikrofona — RØDE Connect ili direktno
+
+Ako oba PodMic-a idu u **RØDE Connect**, on ih sam agregira, radi prelijevanje
+glasova, gate i miks, i izlaže **virtualne** CoreAudio uređaje. Tada aplikacija
+hvata jedan ulaz i cijeli problem se svodi na **jednu korelaciju prema kameri** —
+drift između mikrofona nestaje jer ga je RØDE već poravnao kod sebe.
+
+To je točno i legitimno pojednostavljenje. Ali ima cijenu koju treba znati.
+
+```mermaid
+flowchart TD
+    subgraph DIR["Direktno — svaki PodMic svoj HAL uređaj"]
+        D1["PodMic 1"] --> DA["mic-1.wav<br/>sirovo, 24-bit"]
+        D2["PodMic 2"] --> DB["mic-2.wav<br/>sirovo, 24-bit"]
+        DA --> DR["2 clock domene<br/>drift se mjeri i zapisuje"]
+        DB --> DR
+        DR --> DOK(["Izolirani sirovi tragovi.<br/>Gain, gate i rezanje po govorniku<br/>ostaju otvoreni u postu."])
+    end
+
+    subgraph RC["RØDE Connect — jedan virtualni uređaj"]
+        R1["PodMic 1"] --> RCA["RØDE Connect<br/>gate + ducking + miks"]
+        R2["PodMic 2"] --> RCA
+        RCA --> RCV["virtualni uređaj<br/>2 kanala = MIKS"]
+        RCV --> RCR["1 clock domena<br/>nema drifta mic↔mic"]
+        RCR --> RCOK(["Jedna korelacija prema kameri.<br/>ALI: obrada je ukuhana,<br/>nema sirovih izoliranih tragova."])
+    end
+
+    style DOK fill:#238636,color:#fff
+    style RCOK fill:#9a6700,color:#fff
+```
+
+### Bitno o RØDE Connectu
+
+**Virtualni uređaj daje miks, ne izolirane tragove.** Na Macu se pojave tri
+uređaja, svi 2-kanalni:
+
+| Uređaj | Što je |
+|---|---|
+| `RØDE Connect System` | **zvuk sustava**, ne mikrofoni — nikad ga ne dodjeljuj kao mikrofon |
+| `RØDE Connect Virtual` | virtualni ulaz/izlaz |
+| `RØDE Connect Stream` | miks za streaming aplikacije |
+
+Dva kanala znače **stereo miks**, ne četiri odvojena mikrofona. Izolirani tragovi
+u starom tijeku rada (`PodMic USB Mic1.wav`, `StereoMix.wav`) dolaze iz
+**vlastitog multitrack recordera RØDE Connecta**, a ne iz virtualnog uređaja.
+
+Zato je najbolji hibrid:
+
+```mermaid
+flowchart LR
+    RC["RØDE Connect snima<br/>svoj multitrack na disk"] --> ISO["izolirani sirovi tragovi"]
+    RC --> VIRT["virtualni uređaj"]
+    VIRT --> APP["Domovina Studio<br/>hvata miks"]
+    APP --> SYNC["korelacija prema kameri<br/>→ pomak mikrofon→slika"]
+    APP --> R2["backup na R2 tijekom snimanja"]
+    ISO --> POST["u postu: poravnaj RØDE tragove<br/>prema uhvaćenom miksu"]
+    SYNC --> POST
+    POST --> OUT(["Izolirani sirovi tragovi<br/>+ egzaktan lip sync<br/>+ cloud backup"])
+
+    style OUT fill:#238636,color:#fff
+```
+
+RØDE-ovi izolirani tragovi su međusobno već poravnati (isti program, isti izvor),
+pa je dovoljna jedna korelacija njihovog `StereoMix.wav` prema miksu koji je
+uhvatila aplikacija — i svi tragovi naslijede taj pomak. To je u suštini ono što
+je `podcast_sync.sh` već radio.
+
+### Kako znaš koji je virtualni uređaj pravi
+
+Ne pogađaj i ne vjeruj imenu. **Uključi Pregled i govori** — mjerači rade i prije
+snimanja, pa se odmah vidi koji ulaz nosi mikrofone. (Ranije mjerači nisu radili
+izvan snimanja; popravljeno.)
+
+---
+
 ## 8. Hardverske alternative — poštena ljestvica
 
 ```mermaid

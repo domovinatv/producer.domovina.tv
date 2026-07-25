@@ -36,6 +36,45 @@ let quiet = [Float](repeating: 0, count: 48000)  // 1 s
 for _ in 0..<20 { quiet.withUnsafeBufferPointer { silentMeter.process(samples: $0.baseAddress!, count: quiet.count, sampleRate: sampleRate) } }
 expect(silentMeter.snapshot().isSilent, "mrtvi mikrofon detektiran nakon 20 s tišine")
 
+// ---------- Multi-channel metering ----------
+// The case that matters for a RODE Connect virtual device or two mics hard-panned
+// L/R: channel 0 silent, channel 1 carrying the voice. Metering only channel 0
+// would report a dead mic on a perfectly healthy input.
+let stereoMeter = LevelMeter()
+let frames = 4800
+var left = [Float](repeating: 0, count: frames)                      // silent
+var right = [Float](repeating: 0, count: frames)
+for i in 0..<frames { right[i] = 0.5 * sinf(2 * .pi * 300 * Float(i) / Float(sampleRate)) }
+
+for _ in 0..<10 {
+    left.withUnsafeMutableBufferPointer { l in
+        right.withUnsafeMutableBufferPointer { r in
+            var pointers = [l.baseAddress!, r.baseAddress!]
+            pointers.withUnsafeMutableBufferPointer { channels in
+                stereoMeter.process(channelData: channels.baseAddress!, channelCount: 2,
+                                    frameCount: frames, sampleRate: sampleRate)
+            }
+        }
+    }
+}
+let stereoReading = stereoMeter.snapshot()
+// 0.5 amplitude = -6 dBFS peak, so the right channel must dominate the reading.
+expect(abs(stereoReading.peakDB - (-6)) < 0.6,
+       String(format: "stereo: peak s desnog kanala (%.2f dB, ocekivano -6)", stereoReading.peakDB))
+expect(!stereoReading.isSilent, "stereo: NIJE prijavljen mrtvi mikrofon iako je lijevi kanal tih")
+
+let leftOnlyMeter = LevelMeter()
+for _ in 0..<10 {
+    left.withUnsafeMutableBufferPointer { l in
+        var pointers = [l.baseAddress!]
+        pointers.withUnsafeMutableBufferPointer { channels in
+            leftOnlyMeter.process(channelData: channels.baseAddress!, channelCount: 1,
+                                  frameCount: frames, sampleRate: sampleRate)
+        }
+    }
+}
+expect(leftOnlyMeter.snapshot().rmsDB < -100, "mono tisina: i dalje prijavljena kao tisina")
+
 // ---------- LipSyncMonitor: the real test ----------
 // Same room audio into both feeds, but the camera side delayed by 100 ms.
 // The correlator must report +100 ms (positive = camera lags the microphones).

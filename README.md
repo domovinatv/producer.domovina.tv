@@ -21,7 +21,7 @@ ima svoj neovisni sat.
 
 | | |
 |---|---|
-| **Izolirani tragovi** | svaki mikrofon sa svog HAL uređaja, 24-bit WAV — bez Aggregate Devicea |
+| **Izolirani tragovi** | svaki mikrofon sa svog HAL uređaja, 24-bit WAV — bez Aggregate Devicea (ili jedan RØDE Connect miks, po izboru) |
 | **Mjerenje drifta** | uživo po kanalu u ppm, zapisano u manifest, ispravljeno u postu |
 | **Live lip sync meter** | vrijednost iz sata + neovisna korelacija kao provjera |
 | **R2 tijekom snimanja** | segmenti se šalju dok snima; prekid veze samo povećava zaostatak |

@@ -33,6 +33,35 @@ final class LevelMeter {
         var meanSquare: Float = 0
         vDSP_measqv(samples, 1, &meanSquare, vDSP_Length(count))
 
+        apply(peak: peak, meanSquare: meanSquare, count: count, sampleRate: sampleRate)
+    }
+
+    /// Feeds every channel of a de-interleaved buffer, reporting the loudest.
+    ///
+    /// Reading only channel 0 is wrong for any stereo source — a RØDE Connect
+    /// virtual device, or two mics hard-panned left and right — because one
+    /// speaker can be entirely absent from the channel being metered, and the
+    /// dead-mic alarm would then fire on a perfectly healthy setup.
+    func process(channelData: UnsafePointer<UnsafeMutablePointer<Float>>,
+                 channelCount: Int,
+                 frameCount: Int,
+                 sampleRate: Double) {
+        guard frameCount > 0, channelCount > 0 else { return }
+
+        var loudestPeak: Float = 0
+        var loudestMeanSquare: Float = 0
+        for channel in 0..<channelCount {
+            var peak: Float = 0
+            vDSP_maxmgv(channelData[channel], 1, &peak, vDSP_Length(frameCount))
+            var meanSquare: Float = 0
+            vDSP_measqv(channelData[channel], 1, &meanSquare, vDSP_Length(frameCount))
+            loudestPeak = max(loudestPeak, peak)
+            loudestMeanSquare = max(loudestMeanSquare, meanSquare)
+        }
+        apply(peak: loudestPeak, meanSquare: loudestMeanSquare, count: frameCount, sampleRate: sampleRate)
+    }
+
+    private func apply(peak: Float, meanSquare: Float, count: Int, sampleRate: Double) {
         let peakDB = amplitudeToDB(peak)
         let rmsDB = amplitudeToDB(sqrt(meanSquare))
         let chunkSeconds = Double(count) / sampleRate

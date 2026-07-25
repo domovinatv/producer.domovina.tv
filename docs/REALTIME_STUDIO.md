@@ -53,7 +53,23 @@ Korelacija zato pokriva dvije stvari koje sat ne može znati:
        └── SD kartica (master) ──► poravnava se u postu korelacijom prema proxyju
 ```
 
-### Zašto NE Aggregate Device
+### Dvije podržane postave
+
+Aplikacija ne nameće jednu topologiju — slotovi za mikrofone su samo birači
+uređaja:
+
+* **Direktno** — po jedan PodMic USB u svaki slot. Sirovi izolirani tragovi, dvije
+  clock domene koje se mjere.
+* **RØDE Connect** — jedan slot na virtualni uređaj. RØDE je već agregirao mikrofone
+  pa drifta između njih nema, ali dobiješ obrađen miks, ne sirove tragove.
+
+Trade-off i hibridni pristup su razrađeni u
+[`LIP_SYNC_THEORY.md`](LIP_SYNC_THEORY.md#7b-dvije-postave-mikrofona--røde-connect-ili-direktno).
+
+> `RØDE Connect System` je **zvuk sustava**, ne mikrofoni. Uključi Pregled i govori —
+> mjerači rade i prije snimanja, pa se odmah vidi koji je ulaz pravi.
+
+### Zašto NE Aggregate Device (za direktnu postavu)
 
 Uobičajeni recept za dva USB mikrofona na Macu je Aggregate Device u Audio MIDI
 Setupu. Aplikacija to namjerno ne koristi:
