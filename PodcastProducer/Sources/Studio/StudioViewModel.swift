@@ -284,6 +284,7 @@ final class StudioViewModel: ObservableObject {
 
             newStore.mutate {
                 $0.startedAtHostNanos = self.startHostNanos
+                $0.cameraAVOffsetMilliseconds = self.cameraAVOffsetMilliseconds
                 if self.r2Configuration.isUsable {
                     $0.remote = .init(provider: "cloudflare-r2", bucket: self.r2Configuration.bucket, prefix: self.remotePrefix)
                 }
@@ -569,6 +570,56 @@ final class StudioViewModel: ObservableObject {
 
     func retryFailedUploads() async {
         await uploadQueue?.retryFailed()
+    }
+
+    // MARK: - Camera A/V calibration
+
+    @Published private(set) var cameraAVOffsetMilliseconds: Double? = CameraCalibrationStore.offsetMilliseconds
+    private(set) var calibrationClipURL: URL?
+
+    func refreshCalibration() {
+        cameraAVOffsetMilliseconds = CameraCalibrationStore.offsetMilliseconds
+    }
+
+    /// The offset post-production should apply: what the correlator measured, minus
+    /// the camera's own internal A/V offset. Without the calibration term this is
+    /// the raw correlation, which is right only if the camera's HDMI audio is
+    /// aligned with its picture.
+    var calibratedLipSyncMilliseconds: Double? {
+        guard lipSync.isValid else { return nil }
+        return lipSync.offsetMilliseconds - (cameraAVOffsetMilliseconds ?? 0)
+    }
+
+    /// Records a short clip carrying both the picture and the HDMI audio, which is
+    /// all the calibration measurement needs. Deliberately separate from a real
+    /// take: no microphones, no manifest, no upload.
+    func recordCalibrationClip(seconds: Int, onTick: @escaping (Int) -> Void) async throws {
+        guard isPreviewing else {
+            throw VideoCaptureController.CaptureError.noVideoDevice
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("domovina-calibration-\(UUID().uuidString).mov")
+        try? FileManager.default.removeItem(at: url)
+
+        // The upload-tier writer is irrelevant here and would only burn CPU.
+        videoController.onSegmentReady = nil
+        try videoController.startRecording(masterURL: url)
+
+        for remaining in stride(from: seconds, through: 1, by: -1) {
+            onTick(remaining)
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        onTick(0)
+
+        await videoController.stopRecording()
+        calibrationClipURL = url
+    }
+
+    func discardCalibrationClip() {
+        if let url = calibrationClipURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        calibrationClipURL = nil
     }
 
     // MARK: - Timers

@@ -181,8 +181,8 @@ flowchart TD
     S3["Otvori camera-proxy.mov"] --> S4
     S4{"Frame na kojem se ruke<br/>spoje == transient u<br/>HDMI audio tragu?"}
 
-    S4 -->|"Da, u istom frameu"| OK(["Pretpostavka drži.<br/>Korelator je od sada dovoljan.<br/>Nikad više ne trebaš pljeskati."])
-    S4 -->|"Ne, razlikuje se za N ms"| CAL(["Kamera ima interni A/V pomak N.<br/>Zapiši N kao konstantu kalibracije<br/>i dodaj ga korelatoru."])
+    S4 -->|"Da, u istom frameu"| OK(["N ≈ 0. Pretpostavka drži.<br/>Korelator je i bez ovoga bio dovoljan."])
+    S4 -->|"Ne, razlikuje se za N ms"| CAL(["Kamera ima interni A/V pomak N.<br/>Aplikacija ga spremi i od sada<br/>odbija od svakog mjerenja."])
 
     OK --> DONE(["Snimaj normalno"])
     CAL --> DONE
@@ -190,6 +190,31 @@ flowchart TD
     style OK fill:#238636,color:#fff
     style CAL fill:#9a6700,color:#fff
 ```
+
+### Kako to radi u aplikaciji
+
+**Postavke → Uređaji → Kalibracija pljeskom** (uz uključen Pregled):
+
+1. Snima 15 s klip s HDMI slikom i zvukom — bez mikrofona, bez manifesta, bez uploada.
+2. Pljesneš 3× **blizu kamere**, u kadru.
+3. Aplikacija sama nađe tranzijente u HDMI zvuku (oštar napad, detekcija na 2 ms
+   hopove pa profinjenje do uzorka).
+4. Za svaki pljesak izvuče 13 frameova **na točnim vremenima** oko njega i
+   pokaže ih kao filmstrip s označenim trenutkom zvuka.
+5. Klikneš frame na kojem se ruke spoje. To je jedina prosudba koja ostaje čovjeku
+   — oko to prepozna trenutačno, a detektor svjetline ne može jer pljesak nema
+   svjetlosni potpis.
+6. `N = medijan(vrijeme zvuka − vrijeme framea)`, spremljeno i zapisano u manifest
+   svake sesije kao `cameraAVOffsetMilliseconds`.
+
+Od tada `finalize_session.sh` primjenjuje `korelacija − N`, a live meter pokazuje
+treći broj: **„Na sliku"** — vrijednost koju post stvarno koristi.
+
+> Zašto **blizu kamere**: zvuku treba ~2,9 ms na metar i to kašnjenje ulazi ravno u
+> mjerenje. Na 30 cm je pod milisekundu, na 2 m je 6 ms.
+
+Provjereno na sintetičkom klipu s klikom na 5,000 s i blicom na 4,960 s:
+izmjereno **N = +40,0 ms, greška 0,0 ms**.
 
 Pljesak na početku svake epizode je i dalje **dobra navika** — nije potreban za
 sync, ali daje transient s visokim odnosom signal/šum za brzu ručnu provjeru ako
@@ -299,7 +324,7 @@ Za snimke kraće od 7 minuta preskače — drift je tada zanemariv.
 | Trajektorija drifta mikrofona (svakih 30 s) | ✅ u manifestu |
 | Ispravak drifta mikrofona po dijelovima | ✅ ako odstupanje od pravca > 8 ms |
 | Ispravak drifta SD mastera (`-itsscale`) | ✅ korelacija na dva mjesta |
-| **Kalibracijska konstanta iz pljesak-testa** | ❌ treba dodati |
+| Kalibracijska konstanta iz pljesak-testa | ✅ Postavke → Uređaji → Kalibracija pljeskom |
 
 ### Kako se pomak primjenjuje
 

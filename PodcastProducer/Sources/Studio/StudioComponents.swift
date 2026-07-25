@@ -173,6 +173,8 @@ struct CapturePreviewView: NSViewRepresentable {
 struct SyncMeterView: View {
     let reading: LipSyncMonitor.Reading
     let hasVideo: Bool
+    /// Camera's internal A/V offset from the clap calibration, if measured.
+    let calibrationMilliseconds: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -195,6 +197,13 @@ struct SyncMeterView: View {
                            help: "Razlika između prvog video framea i prvog audio uzorka, mjerena na zajedničkom host clocku. Ovo ide u manifest.")
                     metric(title: "Korelacija", value: reading.isValid ? String(format: "%+.1f ms", reading.offsetMilliseconds) : "—",
                            help: "Neovisna provjera: korelacija anvelope mikrofona i HDMI zvuka iz kamere.")
+                    metric(title: "Na sliku",
+                           value: reading.isValid
+                               ? String(format: "%+.1f ms", reading.offsetMilliseconds - (calibrationMilliseconds ?? 0))
+                               : "—",
+                           help: calibrationMilliseconds == nil
+                               ? "Korelacija minus interni A/V pomak kamere. Kamera nije kalibrirana, pa se pretpostavlja 0 — ovo je vrijednost koju post primjenjuje."
+                               : "Korelacija minus izmjereni interni A/V pomak kamere. Ovo post primjenjuje na mikrofone.")
                     metric(title: "Pouzdanost", value: String(format: "%.0f %%", reading.confidence * 100),
                            help: "Ispod 30 % korelacija nije upotrebljiva — obično znači tišina u sobi.")
                 }

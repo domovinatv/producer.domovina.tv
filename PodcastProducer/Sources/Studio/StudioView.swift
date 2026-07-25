@@ -37,7 +37,8 @@ struct StudioView: View {
                 Divider()
                 microphoneSection
                 Divider()
-                SyncMeterView(reading: model.lipSync, hasVideo: model.isPreviewing)
+                SyncMeterView(reading: model.lipSync, hasVideo: model.isPreviewing,
+                              calibrationMilliseconds: model.cameraAVOffsetMilliseconds)
                 HealthPanelView(report: model.health)
                 UploadPanelView(stats: model.uploadStats) {
                     Task { await model.retryFailedUploads() }

@@ -18,6 +18,8 @@ teorija.
 | `asetrate`+`aresample` bez splita | **0 ms** greške | 1, 2, 6 i 18 dijelova s identičnim rateom → svi 600,000000 s. |
 | `asetrate`+`aresample` s promjenom ratea | **+1–2 ms po operaciji** | Resampler flush doda ~100–200 uzoraka na kraj. Akumulira se po dijelu → obavezno rezati na `end_sample`. |
 | `-itsscale X` uz `-c copy` | skalira trajanje točno za X | 100 s → 100,099935 s pri X=1.001. Ni jedan frame se ne renderira. |
+| `AVAssetImageGenerator` s nultim tolerancijama | vraća točno traženi frame | 13 frameova oko trenutka = 13 različitih trenutaka. S ne-nultom tolerancijom vratio bi isti keyframe i tiho uništio mjerenje. |
+| Brzina zvuka u kalibraciji | ~2,9 ms/m | Pljesak na 2 m unosi 6 ms greške. Zato „blizu kamere" nije savjet nego zahtjev. |
 
 ### Nelinearnost drifta kroz snimku
 
@@ -120,7 +122,7 @@ provjeriti točno njih:
 | Pretpostavka | Ako je pogrešna |
 |---|---|
 | `AVAudioEngine` startaju paralelno, po jedan na svoj HAL uređaj, bez Aggregate Devicea | `engine.start()` padne → spojiti `inputNode` na utišan mixer |
-| HDMI zvuk iz GH5 je poravnan s HDMI slikom | korelator mjeri pomak s konstantnom greškom → jednokratna kalibracija pljeskom daje konstantu |
+| HDMI zvuk iz GH5 je poravnan s HDMI slikom | više nije pretpostavka — kalibracija pljeskom je izmjeri (Postavke → Uređaji) |
 | Elgato 4K X daje 4K/60 u `activeFormat` i HDMI zvuk je stvarno kamerin mikrofon | bez HDMI zvuka nema mjerenja lip synca — samo host clock |
 | `AVAssetWriter` prihvaća `proRes422LT` na 4K na ovom čipu | pasti na HEVC |
 | `.mpeg4AppleHLS` profil daje segmente uz odabrani kodek | nema live video backupa, audio ostaje |
@@ -148,5 +150,7 @@ provjeriti točno njih:
   dijelovima nije izvediv.
 * **`-itsscale` umjesto re-encodea** za drift kamerinog sata — skalira samo
   timestampove, ostaje zero-render.
+* **Čovjek bira frame kontakta pljeska** — pljesak nema svjetlosni potpis, pa
+  automatska detekcija nije moguća; oko to prepozna trenutačno i traje jedan klik.
 * **Sve granice u uzorcima, ne u sekundama** — sekunde uvode zaokruživanje, a
   `atrim=start_sample`/`end_sample` je egzaktan.

@@ -6,6 +6,7 @@ struct StudioSettingsView: View {
     @ObservedObject var model: StudioViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = 0
+    @State private var showCalibration = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,7 +45,10 @@ struct StudioSettingsView: View {
             }
             .padding()
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 620, height: 620)
+        .sheet(isPresented: $showCalibration) {
+            ClapCalibrationView(model: model)
+        }
     }
 
     // MARK: - Devices
@@ -131,6 +135,45 @@ struct StudioSettingsView: View {
                 Text("HDMI zvuk iz GH5 se ne koristi za finalni miks — služi kao referenca za lip sync i za poravnavanje snimke sa SD kartice u postu.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Kalibracija pljeskom", systemImage: "hands.clap")
+                    .font(.headline)
+                Text("Korelator mjeri pomak do HDMI **zvuka**. To je pomak do **slike** samo ako kamera emitira zvuk poravnan sa slikom. Pljesak to provjeri — jednom, ne po epizodi.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    if let offset = model.cameraAVOffsetMilliseconds {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                            Text(String(format: "%+.1f ms", offset))
+                                .font(.callout.monospaced().weight(.medium))
+                            if let at = CameraCalibrationStore.measuredAt {
+                                Text("· \(at.formatted(date: .abbreviated, time: .omitted))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    } else {
+                        HStack(spacing: 6) {
+                            Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+                            Text("nije mjereno — pretpostavlja se 0 ms")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Button(model.cameraAVOffsetMilliseconds == nil ? "Kalibriraj…" : "Ponovi…") {
+                        showCalibration = true
+                    }
+                    .disabled(!model.isPreviewing)
+                }
+                if !model.isPreviewing {
+                    Text("Uključi Pregled da bi kalibracija bila moguća.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
             }
         }
         .disabled(model.isRecording)

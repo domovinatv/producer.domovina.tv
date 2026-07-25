@@ -327,8 +327,10 @@ ispravak treba ukloniti.
 Provjereno na sintetičkoj sesiji: poravnani tragovi su točni **do uzorka** (0,00 ms)
 u obje putanje.
 
-Ostaje nepodržano: kalibracijska konstanta iz jednokratnog pljesak-testa
-(vidi [`LIP_SYNC_THEORY.md`](LIP_SYNC_THEORY.md)).
+3. **Interni A/V pomak kamere** mjeri se jednokratno pljeskom (Postavke → Uređaji).
+   Korelator vidi samo mikrofon→HDMI zvuk; ta konstanta to pretvara u
+   mikrofon→slika. Ako nije mjerena, pretpostavlja se 0 — što je i bilo staro
+   ponašanje. Detalji u [`LIP_SYNC_THEORY.md`](LIP_SYNC_THEORY.md).
 
 ### Što se MORA provjeriti na pravom hardveru
 

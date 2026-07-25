@@ -29,6 +29,13 @@ struct SessionManifest: Codable {
     /// constant offset from one that drifts across a 180-minute episode.
     var syncMeasurements: [SyncSample] = []
 
+    /// The camera's own internal A/V offset, measured once with a clap test:
+    /// how far its HDMI audio sits from its HDMI picture. The correlator can only
+    /// measure microphone-to-HDMI-audio; this constant converts that into
+    /// microphone-to-picture. Nil means it was never measured, and post-production
+    /// then assumes the camera is aligned.
+    var cameraAVOffsetMilliseconds: Double?
+
     var durationSeconds: Double? {
         guard let start = startedAtHostNanos, let stop = stoppedAtHostNanos, stop > start else { return nil }
         return Double(stop - start) / 1_000_000_000.0
@@ -149,9 +156,15 @@ struct SessionManifest: Codable {
         var clockOffsetMilliseconds: Double
     }
 
-    /// Median of the confident measurements — robust to the stretches of silence
-    /// where correlation is meaningless, unlike a mean.
+    /// Median of the confident measurements, with the camera's internal A/V offset
+    /// removed — this is microphone-to-picture, which is what post applies.
     var resolvedSyncOffsetMilliseconds: Double? {
+        guard let raw = rawSyncOffsetMilliseconds else { return nil }
+        return raw - (cameraAVOffsetMilliseconds ?? 0)
+    }
+
+    /// Median of the confident correlation measurements, before calibration.
+    var rawSyncOffsetMilliseconds: Double? {
         let confident = syncMeasurements.filter { $0.confidence > 0.3 }.map(\.offsetMilliseconds).sorted()
         guard confident.count >= 3 else { return nil }
         let middle = confident.count / 2

@@ -237,27 +237,35 @@ def median(values):
     return ordered[mid]
 
 
+# The camera's own internal A/V offset, from the one-time clap calibration. The
+# correlator can only see microphone-to-HDMI-audio; subtracting this turns it into
+# microphone-to-picture. Absent means the camera is assumed aligned, which is the
+# usual case and was the old behaviour.
+calibration = manifest.get("cameraAVOffsetMilliseconds")
+calibration = 0.0 if calibration is None else float(calibration)
+
 if len(samples) >= 3:
-    offsets = [s["offsetMilliseconds"] for s in samples]
+    offsets = [s["offsetMilliseconds"] - calibration for s in samples]
     overall = median(offsets)
     # Split by time, not by list position, so an uneven sampling rate cannot
     # skew the drift estimate.
     times = [s.get("hostNanos") or 0 for s in samples]
     midpoint = (min(times) + max(times)) / 2.0
-    first = [s["offsetMilliseconds"] for s in samples if (s.get("hostNanos") or 0) <= midpoint]
-    second = [s["offsetMilliseconds"] for s in samples if (s.get("hostNanos") or 0) > midpoint]
+    first = [s["offsetMilliseconds"] - calibration for s in samples if (s.get("hostNanos") or 0) <= midpoint]
+    second = [s["offsetMilliseconds"] - calibration for s in samples if (s.get("hostNanos") or 0) > midpoint]
     first_median = median(first)
     second_median = median(second)
     spread = max(offsets) - min(offsets)
-    print("SYNC\t%.3f\t%d\t%.3f\t%.3f\t%.3f" % (
+    print("SYNC\t%.3f\t%d\t%.3f\t%.3f\t%.3f\t%.3f" % (
         overall,
         len(samples),
         spread,
         first_median if first_median is not None else overall,
         second_median if second_median is not None else overall,
+        calibration,
     ))
 else:
-    print("SYNC\t-\t%d\t-\t-\t-" % len(samples))
+    print("SYNC\t-\t%d\t-\t-\t-\t%.3f" % (len(samples), calibration))
 
 for event in manifest.get("events", []):
     if not event.get("isMarker"):
@@ -279,7 +287,7 @@ SESSION_ID=""
 SESSION_DURATION=""
 MIC_IDS=(); MIC_PATHS=(); MIC_OFFSETS=(); MIC_NOMINAL=(); MIC_MEASURED=(); MIC_LABELS=()
 MARKER_TIMES=(); MARKER_TEXTS=()
-SYNC_MS="-"; SYNC_COUNT=0; SYNC_SPREAD="-"; SYNC_FIRST="-"; SYNC_SECOND="-"
+SYNC_MS="-"; SYNC_COUNT=0; SYNC_SPREAD="-"; SYNC_FIRST="-"; SYNC_SECOND="-"; SYNC_CALIB="0"
 
 # Parallel indexed arrays, aligned with MIC_IDS. macOS ships bash 3.2, which has
 # no associative arrays — `declare -A` fails outright there, so this stays
@@ -315,7 +323,7 @@ while IFS=$'\t' read -r kind f2 f3 f4 f5 f6 f7; do
                      MIC_DRIFT_INTERVALS[$di]="${MIC_DRIFT_INTERVALS[$di]}${f3}:${f4}:${f5} "
                  fi ;;
         SYNC)    SYNC_MS="$f2"; SYNC_COUNT="$f3"; SYNC_SPREAD="$f4"
-                 SYNC_FIRST="$f5"; SYNC_SECOND="$f6" ;;
+                 SYNC_FIRST="$f5"; SYNC_SECOND="$f6"; SYNC_CALIB="$f7" ;;
         MARKER)  MARKER_TIMES+=("$f2"); MARKER_TEXTS+=("$f3") ;;
     esac
 done <<< "$MANIFEST_DATA"
@@ -355,6 +363,11 @@ if [[ "$SYNC_MS" != "-" ]]; then
     printf "🎯 Pomak mikrofon→slika iz korelacije: %+.1f ms  (%s mjerenja, raspon %.1f ms)\n" \
         "$SYNC_MS" "$SYNC_COUNT" "$SYNC_SPREAD"
     printf "   prva polovina %+.1f ms → druga polovina %+.1f ms\n" "$SYNC_FIRST" "$SYNC_SECOND"
+    if python3 -c "import sys; sys.exit(0 if abs(${SYNC_CALIB}) > 0.05 else 1)"; then
+        printf "   uključena kalibracija kamere: %+.1f ms (pljesak-test)\n" "$SYNC_CALIB"
+    else
+        echo "   bez kalibracije kamere — pretpostavlja se da je HDMI zvuk poravnan sa slikom"
+    fi
 
     # A walking offset means one global correction leaves a residual at the ends.
     SYNC_TREND="$(python3 -c "print(round(abs(${SYNC_SECOND}-${SYNC_FIRST}), 1))")"
