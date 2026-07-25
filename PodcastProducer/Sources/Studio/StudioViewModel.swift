@@ -66,6 +66,7 @@ final class StudioViewModel: ObservableObject {
     private var uploadQueue: UploadQueue?
     private var remotePrefix: String = ""
     private var startHostNanos: UInt64 = 0
+    private var syncSampleTick = 0
     private var fastTimer: Timer?
     private var slowTimer: Timer?
     private var deviceListener: AudioObjectPropertyListenerBlock?
@@ -372,6 +373,22 @@ final class StudioViewModel: ObservableObject {
         store?.mutate { $0.stoppedAtHostNanos = stopHostNanos }
         store?.log("Snimanje zaustavljeno")
         writeFinalTrackStatistics()
+
+        // Say out loud whether post has what it needs to fix lip sync, because
+        // discovering it does not is a lot worse in the edit than here.
+        if let manifest = store?.snapshot() {
+            if let offset = manifest.resolvedSyncOffsetMilliseconds {
+                store?.log(String(
+                    format: "Izmjeren pomak mikrofon→slika: %+.1f ms (%d mjerenja) — primijenit će ga finalize_session.sh",
+                    offset, manifest.syncMeasurements.count
+                ))
+            } else if manifest.tracks.contains(where: { $0.kind == .cameraProxyVideo }) {
+                store?.log(
+                    "Nema dovoljno pouzdanih mjerenja lip synca — provjeri je li HDMI zvuk iz kamere bio odabran.",
+                    level: .warning
+                )
+            }
+        }
         store?.saveNow()
 
         isRecording = false
@@ -495,6 +512,7 @@ final class StudioViewModel: ObservableObject {
         // Correlation runs off the main thread; the result is read next tick.
         lipSyncQueue.async { [lipSyncMonitor] in lipSyncMonitor.recompute() }
         lipSync = lipSyncMonitor.snapshot()
+        recordSyncMeasurementIfDue()
 
         if let queue = uploadQueue {
             uploadStats = await queue.currentStats()
@@ -520,6 +538,35 @@ final class StudioViewModel: ObservableObject {
 
         if let store {
             recentEvents = Array(store.snapshot().events.suffix(40).reversed())
+        }
+    }
+
+    /// Persists the measured microphone→picture offset every few seconds.
+    ///
+    /// Without this the correlator is only a light on the dashboard: the host
+    /// clock cannot see pipeline latency, so post has nothing to correct with.
+    /// Storing the series rather than a running average is deliberate — it is
+    /// the only way to tell a constant offset from one that walks over 180
+    /// minutes.
+    private func recordSyncMeasurementIfDue() {
+        guard isRecording, let store else { return }
+
+        syncSampleTick += 1
+        guard syncSampleTick >= 5 else { return }   // tickSlow runs at 1 Hz
+        syncSampleTick = 0
+
+        let reading = lipSync
+        guard reading.isValid else { return }       // silence in the room, nothing to learn
+
+        store.mutate {
+            $0.syncMeasurements.append(
+                .init(
+                    hostNanos: HostClock.now(),
+                    offsetMilliseconds: reading.offsetMilliseconds,
+                    confidence: reading.confidence,
+                    clockOffsetMilliseconds: reading.clockOffsetMilliseconds
+                )
+            )
         }
     }
 

@@ -21,6 +21,14 @@ struct SessionManifest: Codable {
     var events: [Event] = []
     var remote: RemoteInfo?
 
+    /// Time series of the measured microphone→picture offset, sampled through
+    /// the take. This is the number post-production must apply: the host clock
+    /// only says when data reached the driver, and the video path is stamped
+    /// 40–100 ms later than the audio path for the same real-world moment.
+    /// Keeping the whole series (not just an average) is what lets post tell a
+    /// constant offset from one that drifts across a 180-minute episode.
+    var syncMeasurements: [SyncSample] = []
+
     var durationSeconds: Double? {
         guard let start = startedAtHostNanos, let stop = stoppedAtHostNanos, stop > start else { return nil }
         return Double(stop - start) / 1_000_000_000.0
@@ -111,6 +119,28 @@ struct SessionManifest: Codable {
         var durationSeconds: Double
         var uploaded: Bool = false
         var uploadedAt: Date?
+    }
+
+    struct SyncSample: Codable {
+        var hostNanos: UInt64
+        /// Positive means the camera feed (and therefore the picture) lags the
+        /// microphones by this much, so the microphones need delaying by it.
+        var offsetMilliseconds: Double
+        /// Normalised correlation peak, 0...1. Only samples above ~0.3 mean anything.
+        var confidence: Double
+        /// What the raw host-clock timestamps claimed, kept for comparison.
+        var clockOffsetMilliseconds: Double
+    }
+
+    /// Median of the confident measurements — robust to the stretches of silence
+    /// where correlation is meaningless, unlike a mean.
+    var resolvedSyncOffsetMilliseconds: Double? {
+        let confident = syncMeasurements.filter { $0.confidence > 0.3 }.map(\.offsetMilliseconds).sorted()
+        guard confident.count >= 3 else { return nil }
+        let middle = confident.count / 2
+        return confident.count.isMultiple(of: 2)
+            ? (confident[middle - 1] + confident[middle]) / 2
+            : confident[middle]
     }
 
     struct Event: Codable, Identifiable {

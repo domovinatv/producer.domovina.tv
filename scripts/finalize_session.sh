@@ -161,6 +161,46 @@ for track in tracks:
         field(track.get("label", "").replace("\t", " ")),
     ))
 
+# The microphone→picture offset, measured during the take by correlating the
+# microphones against the camera's HDMI audio. This is NOT the same thing as the
+# host-clock offset: timestamps mark when data reached the driver, and the video
+# path is stamped 40–100 ms later than the audio path for the same real moment.
+# Without applying this, audio ends up ahead of picture by that amount.
+samples = [s for s in manifest.get("syncMeasurements", []) if (s.get("confidence") or 0) > 0.3]
+
+
+def median(values):
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 0:
+        return (ordered[mid - 1] + ordered[mid]) / 2.0
+    return ordered[mid]
+
+
+if len(samples) >= 3:
+    offsets = [s["offsetMilliseconds"] for s in samples]
+    overall = median(offsets)
+    # Split by time, not by list position, so an uneven sampling rate cannot
+    # skew the drift estimate.
+    times = [s.get("hostNanos") or 0 for s in samples]
+    midpoint = (min(times) + max(times)) / 2.0
+    first = [s["offsetMilliseconds"] for s in samples if (s.get("hostNanos") or 0) <= midpoint]
+    second = [s["offsetMilliseconds"] for s in samples if (s.get("hostNanos") or 0) > midpoint]
+    first_median = median(first)
+    second_median = median(second)
+    spread = max(offsets) - min(offsets)
+    print("SYNC\t%.3f\t%d\t%.3f\t%.3f\t%.3f" % (
+        overall,
+        len(samples),
+        spread,
+        first_median if first_median is not None else overall,
+        second_median if second_median is not None else overall,
+    ))
+else:
+    print("SYNC\t-\t%d\t-\t-\t-" % len(samples))
+
 for event in manifest.get("events", []):
     if not event.get("isMarker"):
         continue
@@ -181,6 +221,7 @@ SESSION_ID=""
 SESSION_DURATION=""
 MIC_IDS=(); MIC_PATHS=(); MIC_OFFSETS=(); MIC_NOMINAL=(); MIC_MEASURED=(); MIC_LABELS=()
 MARKER_TIMES=(); MARKER_TEXTS=()
+SYNC_MS="-"; SYNC_COUNT=0; SYNC_SPREAD="-"; SYNC_FIRST="-"; SYNC_SECOND="-"
 
 while IFS=$'\t' read -r kind f2 f3 f4 f5 f6 f7; do
     case "$kind" in
@@ -188,6 +229,8 @@ while IFS=$'\t' read -r kind f2 f3 f4 f5 f6 f7; do
         PROXY)   PROXY_REL="$f2"; PROXY_W="$f3"; PROXY_H="$f4"; PROXY_FPS="$f5" ;;
         MIC)     MIC_IDS+=("$f2"); MIC_PATHS+=("$f3"); MIC_OFFSETS+=("$f4")
                  MIC_NOMINAL+=("$f5"); MIC_MEASURED+=("$f6"); MIC_LABELS+=("$f7") ;;
+        SYNC)    SYNC_MS="$f2"; SYNC_COUNT="$f3"; SYNC_SPREAD="$f4"
+                 SYNC_FIRST="$f5"; SYNC_SECOND="$f6" ;;
         MARKER)  MARKER_TIMES+=("$f2"); MARKER_TEXTS+=("$f3") ;;
     esac
 done <<< "$MANIFEST_DATA"
@@ -208,12 +251,42 @@ for index in "${!MIC_PATHS[@]}"; do
 done
 
 # --- 5. ISPIS IZRAČUNATIH POMAKA ---
-echo "📐 Pomaci prema vremenskoj osi proxyja (iz host clocka, bez korelacije):"
+echo "📐 Pomaci mikrofona prema vremenskoj osi proxyja (iz host clocka):"
 for index in "${!MIC_IDS[@]}"; do
     printf "   %-10s %-22s offset %+9.4f s   drift %+7.1f ppm\n" \
         "${MIC_IDS[$index]}" "${MIC_LABELS[$index]}" "${MIC_OFFSETS[$index]}" \
         "$(python3 -c "print((${MIC_MEASURED[$index]}/${MIC_NOMINAL[$index]}-1)*1e6)")"
 done
+echo ""
+
+# --- 5b. POMAK MIKROFON → SLIKA (iz korelacije s HDMI zvukom) ---
+# Host clock ne vidi latenciju lanaca: video s Elgata je označen desetinama
+# milisekundi kasnije od zvuka iz mikrofona za isti stvarni trenutak. HDMI zvuk
+# iz kamere putuje istim lancem kao slika, pa korelacija mikrofona i HDMI zvuka
+# daje točno tu razliku. Bez ovoga zvuk pretječe sliku.
+SYNC_OFFSET_S="0"
+if [[ "$SYNC_MS" != "-" ]]; then
+    SYNC_OFFSET_S="$(python3 -c "print(${SYNC_MS}/1000.0)")"
+    printf "🎯 Pomak mikrofon→slika iz korelacije: %+.1f ms  (%s mjerenja, raspon %.1f ms)\n" \
+        "$SYNC_MS" "$SYNC_COUNT" "$SYNC_SPREAD"
+    printf "   prva polovina %+.1f ms → druga polovina %+.1f ms\n" "$SYNC_FIRST" "$SYNC_SECOND"
+
+    # A walking offset means one global correction leaves a residual at the ends.
+    SYNC_TREND="$(python3 -c "print(round(abs(${SYNC_SECOND}-${SYNC_FIRST}), 1))")"
+    if python3 -c "import sys; sys.exit(0 if ${SYNC_TREND} > 25 else 1)"; then
+        echo "   ⚠️  Pomak se mijenja za ${SYNC_TREND} ms kroz snimku — jedan globalni ispravak"
+        echo "      ostavlja rezidual na krajevima. Za duge epizode treba ispravak po dijelovima."
+    else
+        echo "   ✅ Pomak je stabilan kroz snimku (promjena ${SYNC_TREND} ms) — globalni ispravak je dovoljan."
+    fi
+    if python3 -c "import sys; sys.exit(0 if ${SYNC_SPREAD} > 60 else 1)"; then
+        echo "   ⚠️  Velik raspon mjerenja — provjeri rezultat na pljesku ili jasnom transientu."
+    fi
+else
+    echo "🎯 Pomak mikrofon→slika: NEMA MJERENJA (${SYNC_COUNT} pouzdanih uzoraka)"
+    echo "   Poravnava se samo po host clocku, što ostavlja latenciju lanca neispravljenom."
+    echo "   Ako je sesija imala video, provjeri je li HDMI zvuk iz kamere bio odabran."
+fi
 echo ""
 
 # --- 6. POMAK SD SNIMKE (jedina stvar koju treba korelirati) ---
@@ -278,18 +351,30 @@ for index in "${!MIC_IDS[@]}"; do
 
     filter="asetrate=${measured},aresample=${nominal}"
 
-    # Positive offset: the mic started after the video, so pad the front.
-    # Negative offset: the mic started first, so trim the head.
-    if python3 -c "import sys; sys.exit(0 if $offset >= 0.0005 else 1)"; then
-        delay_ms="$(python3 -c "print(int(round($offset*1000)))")"
+    # Total shift = where the host clock says this file starts, PLUS the measured
+    # pipeline-latency difference between the audio and video chains. The second
+    # term is the one the clock cannot see, and omitting it puts the audio ahead
+    # of the picture by the whole amount.
+    total="$(python3 -c "print(${offset} + ${SYNC_OFFSET_S})")"
+
+    # Positive: microphone content sits earlier than the picture, so pad the front.
+    # Negative: microphone content sits later, so trim the head.
+    if python3 -c "import sys; sys.exit(0 if $total >= 0.0005 else 1)"; then
+        delay_ms="$(python3 -c "print(int(round($total*1000)))")"
         filter="${filter},adelay=${delay_ms}:all=1"
-        echo "   $mic_id: +${delay_ms} ms tišine na početak"
-    elif python3 -c "import sys; sys.exit(0 if $offset <= -0.0005 else 1)"; then
-        trim_s="$(python3 -c "print(abs($offset))")"
+        printf "   %-10s +%d ms tišine na početak  (sat %+.1f ms + lanac %+.1f ms)\n" \
+            "$mic_id" "$delay_ms" \
+            "$(python3 -c "print($offset*1000)")" \
+            "$(python3 -c "print(${SYNC_OFFSET_S}*1000)")"
+    elif python3 -c "import sys; sys.exit(0 if $total <= -0.0005 else 1)"; then
+        trim_s="$(python3 -c "print(abs($total))")"
         filter="atrim=start=${trim_s},asetpts=PTS-STARTPTS,${filter}"
-        echo "   $mic_id: režem ${trim_s} s s početka"
+        printf "   %-10s režem %.4f s s početka  (sat %+.1f ms + lanac %+.1f ms)\n" \
+            "$mic_id" "$trim_s" \
+            "$(python3 -c "print($offset*1000)")" \
+            "$(python3 -c "print(${SYNC_OFFSET_S}*1000)")"
     else
-        echo "   $mic_id: već poravnan"
+        printf "   %-10s već poravnan\n" "$mic_id"
     fi
 
     ffmpeg -v error -i "$src" -af "$filter" -c:a pcm_s24le -y "$dst" || {

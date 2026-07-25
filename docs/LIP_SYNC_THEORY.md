@@ -291,13 +291,42 @@ frame, pa ostaje zero-render filozofija cijelog projekta.
 | Ispravak drifta mikrofona | ✅ jedan globalni odnos |
 | Pomak mikrofon → slika | ✅ mjeren korelacijom, kontinuirano |
 | Prikaz „sat vs korelacija" kao provjera | ✅ ako se razilaze > 40 ms, alarm |
-| **Trajektorija drifta (zapis svakih 30 s)** | ❌ treba dodati |
-| **Vremenski niz izmjerenog pomaka u manifest** | ❌ treba dodati |
+| Vremenski niz izmjerenog pomaka u manifest | ✅ uzorak svakih 5 s, samo pouzdani |
+| **Primjena izmjerenog pomaka na miks** | ✅ medijan, dodan na host-clock pomak |
+| Detekcija „šeta li pomak kroz snimku" | ✅ prva vs druga polovina, upozorenje > 25 ms |
+| **Trajektorija drifta mikrofona (svakih 30 s)** | ❌ treba dodati |
 | **Ispravak drifta SD mastera (`-itsscale`)** | ❌ treba dodati |
 | **Kalibracijska konstanta iz pljesak-testa** | ❌ treba dodati |
 
-Prve dvije su male izmjene: aplikacija već računa oba broja svake sekunde, samo ih
-ne zapisuje kroz vrijeme. Treća je izmjena u `finalize_session.sh`.
+### Kako se pomak primjenjuje
+
+Medijan, ne prosjek — jer u tišini korelacija daje besmislice, a jedan izlet od
+−400 ms bi prosjek uništio. Uzorci s pouzdanošću pod 0,3 se odbacuju prije
+medijana.
+
+```
+ukupni_pomak_mikrofona = pomak_iz_host_clocka + izmjerena_latencija_lanca
+```
+
+Primjer iz stvarnog izlaza skripte:
+
+```
+🎯 Pomak mikrofon→slika iz korelacije: +92.3 ms  (36 mjerenja, raspon 6.4 ms)
+   prva polovina +91.0 ms → druga polovina +93.7 ms
+   ✅ Pomak je stabilan kroz snimku (promjena 2.7 ms) — globalni ispravak je dovoljan.
+
+🛠️  Ispravljam drift i poravnavam mikrofone…
+   mic-1      +342 ms tišine na početak  (sat +250.0 ms + lanac +92.3 ms)
+   mic-2      režem 0.0277 s s početka   (sat -120.0 ms + lanac +92.3 ms)
+```
+
+Obrati pažnju na `mic-2`: host clock je govorio −120 ms (reži), ali nakon dodavanja
+latencije lanca ukupno je −27,7 ms — još uvijek rezanje, ali četiri puta manje.
+Da se latencija ignorirala, taj bi trag bio 92 ms van syncа.
+
+**Ovo je odgovor na „šeta li pomak kroz 180 minuta": skripta ti kaže.** Usporedi
+prvu i drugu polovinu snimke; ako se razlikuju više od 25 ms, javi da jedan
+globalni ispravak nije dovoljan.
 
 ---
 

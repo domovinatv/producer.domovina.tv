@@ -220,7 +220,8 @@ Skripta:
 
 1. pročita manifest,
 2. ispravi drift svakog mikrofona,
-3. poravna mikrofone na vremensku os proxyja (`adelay` ili `atrim`),
+3. poravna mikrofone na vremensku os proxyja — **host-clock pomak plus izmjerena
+   latencija lanca** iz korelacije HDMI zvuka (`adelay` ili `atrim`),
 4. napravi miks (`normalize=0` da razine kanala ostanu netaknute, pa `alimiter`),
 5. korelacijom nađe gdje proxy počinje unutar SD snimke,
 6. muxa SD snimku s miksom uz `-c:v copy` — bez renderiranja videa.
@@ -251,9 +252,10 @@ Napisano i testirano bez priključenih mikrofona i kamere. Provjereno je:
 
 Detaljno objašnjeno u [`LIP_SYNC_THEORY.md`](LIP_SYNC_THEORY.md):
 
-1. **Drift se zapisuje kao jedan globalni odnos**, a termalna komponenta je
-   nelinearna → rezidual 10–30 ms na krajevima duge snimke. Treba zapisivati
-   trajektoriju drifta svakih 30 s i ispravljati po dijelovima.
+1. **Drift mikrofona se zapisuje kao jedan globalni odnos**, a termalna komponenta
+   je nelinearna → rezidual 10–30 ms na krajevima duge snimke. Treba zapisivati
+   trajektoriju drifta svakih 30 s i ispravljati po dijelovima. (Pomak
+   mikrofon→slika se **već** bilježi kroz vrijeme i skripta javlja ako šeta.)
 2. **`finalize_session.sh` korelira SD master samo na početku.** Kamerin sat drifta
    kroz snimku, pa na 180 min kraj epizode može biti do ~324 ms van syncа. Treba
    korelirati na dva mjesta i primijeniti `ffmpeg -itsscale` (skalira timestampove

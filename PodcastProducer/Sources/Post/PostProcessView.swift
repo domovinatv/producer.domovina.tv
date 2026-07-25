@@ -113,6 +113,8 @@ struct PostProcessView: View {
                 }
             }
 
+            syncRow(manifest)
+
             ForEach(manifest.tracks) { track in
                 trackRow(track, sessionStart: manifest.startedAtHostNanos)
             }
@@ -133,6 +135,42 @@ struct PostProcessView: View {
                 }
                 .font(.callout)
             }
+        }
+    }
+
+    /// The measured microphone→picture offset. Shown prominently because if it is
+    /// missing, the finalize script can only align by host clock and the audio
+    /// ends up ahead of the picture.
+    @ViewBuilder
+    private func syncRow(_ manifest: SessionManifest) -> some View {
+        let hasVideo = manifest.tracks.contains { $0.kind == .cameraProxyVideo }
+        if hasVideo {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: manifest.resolvedSyncOffsetMilliseconds != nil
+                      ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(manifest.resolvedSyncOffsetMilliseconds != nil ? Color.green : Color.orange)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pomak mikrofon → slika").fontWeight(.medium)
+                    if manifest.resolvedSyncOffsetMilliseconds != nil {
+                        Text("medijan iz \(manifest.syncMeasurements.count) mjerenja korelacije HDMI zvuka")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("nema pouzdanih mjerenja — poravnava se samo po satu, latencija lanca ostaje")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Spacer()
+                if let offset = manifest.resolvedSyncOffsetMilliseconds {
+                    Text(String(format: "%+.1f ms", offset))
+                        .font(.callout.monospaced().weight(.medium))
+                }
+            }
+            .padding(8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
     }
 
