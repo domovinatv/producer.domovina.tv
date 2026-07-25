@@ -27,6 +27,7 @@ ima svoj neovisni sat.
 | **R2 tijekom snimanja** | segmenti se šalju dok snima; prekid veze samo povećava zaostatak |
 | **Dvostruko snimanje** | SD kartica = master, HDMI capture = sinkroni proxy i backup |
 | **Zdravlje sustava** | disk, mrtvi mikrofon, clipping, USB odspajanje, termika |
+| **Oporavak** | ako Mac otkaže, `scripts/recover_from_r2.py` rekonstruira sesiju iz segmenata |
 
 ```bash
 ./scripts/build_app.sh          # .app bundle (potrebno za dopuštenja mic/kamere)
@@ -133,6 +134,7 @@ cd PodcastProducer && swift run
 ./scripts/test.sh          # sve
 ./scripts/test_core.sh     # sat, mjerači, lip sync korelator, manifest
 ./scripts/test_sigv4.sh    # R2 potpisivanje protiv AWS test vektora
+./scripts/test_recover.sh  # oporavak sesije: spajanje fMP4 i WAV segmenata
 ```
 
 ## 📝 License

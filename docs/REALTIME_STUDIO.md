@@ -111,7 +111,7 @@ zatim ispravlja s `asetrate` + `aresample`.
 | `audio/mic-N.wav` | izolirani mikrofon, 24-bit LPCM, kontinuirano | ~0,5 GB |
 | `segments/mic-N/*.wav` | isti zvuk u 60-sekundnim komadima za R2 | briše se nakon uploada |
 | `video/camera-proxy.mov` | HDMI capture, HEVC ili ProRes | 9–45 GB |
-| `segments/video/*.mp4` | fMP4 komadi ~3 Mbps za R2 | briše se nakon uploada |
+| `segments/video/video-init.mp4` + `*.m4s` | fMP4 komadi ~3 Mbps za R2 | briše se nakon uploada |
 | `manifest.json` | uređaji, pomaci, drift, oznake, dnevnik | KB |
 | `upload-journal.json` | stanje reda za slanje (preživi pad aplikacije) | KB |
 
@@ -153,13 +153,54 @@ Pravila kojih se upload drži:
 4. **Odustaje kad treba.** HTTP 4xx (osim 429) se ne ponavlja — pogrešan ključ se
    neće ispraviti stotim pokušajem.
 
+### Ništa se ne spaja tijekom snimanja
+
+Čest nesporazum, pa da bude jasno: aplikacija **ne poziva ffmpeg tijekom
+snimanja** — nula puta. Ne postoji korak u kojem se minutni fajlovi spajaju u
+veći.
+
+Umjesto toga se piše **dvostruko, paralelno, iz istog buffera**:
+
+| | Lokalno | Na R2 |
+|---|---|---|
+| Audio | `audio/mic-N.wav` — **jedan cjelovit fajl**, raste kroz cijelu snimku | 60 s segmenti, brišu se lokalno nakon uploada |
+| Video | `video/camera-proxy.mov` — **jedan cjelovit fajl**, fragmentiran svake 2 s | ~6 s fMP4 komadi, brišu se lokalno nakon uploada |
+
+Dakle: **nakon zaustavljanja nemaš što spajati.** Lokalne datoteke su već
+cjelovite; segmenti su bili samo kopija koja putuje u oblak dok snimaš.
+
+Za YouTube ide izlaz iz `finalize_session.sh` (`*_final.mov`) — SD master s
+miksom, muxan bez renderiranja. Segmenti u tome ne sudjeluju.
+
+### Kad segmenti postaju važni
+
+Samo ako lokalnih datoteka nema: Mac se ugasio, disk je otkazao. Tada su R2
+segmenti jedina kopija:
+
+```bash
+./scripts/recover_from_r2.py \
+  --prefix sessions/2026-07-25-1930-epizoda-42 \
+  --output ~/Desktop/oporavak
+```
+
+Skripta lista bucket (namjerno **ne** ovisi o manifestu, jer se manifest šalje tek
+pri zaustavljanju i kod pada ga nema), preuzme sve, pa spoji:
+
+* audio — `ffmpeg concat`, stream copy;
+* video — fMP4 se spaja **bajtovnom konkatenacijom, initialization segment prvi**,
+  jer on nosi `moov` box bez kojeg se fragmenti ne mogu dekodirati; zatim remux da
+  container dobije indeks.
+
+Zato se initialization segment sprema pod imenom `video-init.mp4`, a fragmenti kao
+`video-NNNNN.m4s` — da oporavak nikad ne mora pogađati koji je koji.
+
 Struktura u bucketu:
 
 ```
 sessions/2026-07-25-1930-epizoda-42/
 ├── manifest.json
 ├── audio/mic-1/mic-1-00000.wav …
-├── video/segments/video-00000.mp4 …
+├── video/segments/video-init.mp4, video-00001.m4s …
 └── masters/camera-proxy.mov, mic-1.wav, mic-2.wav
 ```
 

@@ -383,9 +383,13 @@ final class StudioViewModel: ObservableObject {
         let uploadDuringRecording = r2Configuration.uploadDuringRecording
         let stagingRoot = store.segmentsURL.appendingPathComponent("video", isDirectory: true)
 
-        videoController.onSegmentReady = { [weak self] data, index, hostNanos in
+        videoController.onSegmentReady = { [weak self] data, index, hostNanos, isInitialization in
             guard let self else { return }
-            let name = String(format: "video-%05d.mp4", index)
+            // The initialization segment gets a name that sorts first and reads
+            // unambiguously, so recovery never has to infer it from an index.
+            let name = isInitialization
+                ? "video-init.mp4"
+                : String(format: "video-%05d.m4s", index)
             let key = "\(self.remotePrefix)/video/segments/\(name)"
 
             store.mutate { manifest in
@@ -396,7 +400,8 @@ final class StudioViewModel: ObservableObject {
                           remoteKey: key,
                           byteCount: data.count,
                           startHostNanos: hostNanos,
-                          durationSeconds: self.videoController.uploadSegmentSeconds)
+                          durationSeconds: isInitialization ? 0 : self.videoController.uploadSegmentSeconds,
+                          isInitialization: isInitialization)
                 )
             }
 

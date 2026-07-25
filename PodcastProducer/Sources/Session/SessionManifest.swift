@@ -119,6 +119,9 @@ struct SessionManifest: Codable {
         var durationSeconds: Double
         var uploaded: Bool = false
         var uploadedAt: Date?
+        /// fMP4 only: the chunk carrying the moov box. Must come first when
+        /// reassembling, otherwise nothing decodes.
+        var isInitialization: Bool = false
     }
 
     struct SyncSample: Codable {

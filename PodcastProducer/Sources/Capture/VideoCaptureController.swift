@@ -88,7 +88,10 @@ final class VideoCaptureController: NSObject {
     var maxCaptureHeight = 2160
 
     /// Fired on the writer queue when an fMP4 chunk is ready to upload.
-    var onSegmentReady: ((Data, Int, UInt64) -> Void)?
+    /// The `isInitialization` flag marks the very first chunk, which carries the
+    /// moov box: without it the media chunks are undecodable, so recovery has to
+    /// know which one it is.
+    var onSegmentReady: ((Data, Int, UInt64, Bool) -> Void)?
     /// Mono camera-side samples for the lip-sync correlator.
     var onMonitorSamples: ((UnsafePointer<Float>, Int, Double, UInt64) -> Void)?
 
@@ -544,6 +547,6 @@ extension VideoCaptureController: AVAssetWriterDelegate {
         stateLock.lock()
         status.segmentsWritten = segmentIndex
         stateLock.unlock()
-        onSegmentReady?(segmentData, index, segmentStartHostNanos)
+        onSegmentReady?(segmentData, index, segmentStartHostNanos, segmentType == .initialization)
     }
 }
