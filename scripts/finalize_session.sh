@@ -133,7 +133,10 @@ if proxy:
         field(proxy.get("relativePath")),
         field(proxy.get("width") or 0),
         field(proxy.get("height") or 0),
-        field(proxy.get("nominalFrameRate") or 0),
+        # Measured first: the capture device advertises what its format can do
+        # (the Elgato 4K X claims 120 fps), not what the camera actually sent.
+        field("%.3f" % proxy["measuredFrameRate"] if proxy.get("measuredFrameRate")
+              else (proxy.get("nominalFrameRate") or 0)),
     ))
 
 for track in tracks:

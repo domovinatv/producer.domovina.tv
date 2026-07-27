@@ -99,6 +99,14 @@ struct SessionManifest: Codable {
         var measuredSampleRate: Double?
         var driftPPM: Double?
 
+        /// Frame rate as actually delivered, measured against the host clock.
+        ///
+        /// `nominalFrameRate` is what the *capture device's* active format can
+        /// do, not what the camera on the far end of the cable is sending: the
+        /// Elgato 4K X advertises 120 fps on a 3840×2160 format while a GH5
+        /// feeds it 30. Only this number describes the file that was written.
+        var measuredFrameRate: Double?
+
         /// Chunks handed to the uploader, in order.
         var segments: [Segment] = []
 

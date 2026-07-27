@@ -112,25 +112,115 @@ Implementacija je bila ispravna, test pogrešan.
 > Pravilo: kad se dvije neovisne implementacije poklope a „očekivana" vrijednost ne,
 > posumnjaj u očekivanu vrijednost. Provjeri izvor, ne pamćenje.
 
+### 9. `forImportantUsage` vraća 0 na exFAT-u
+
+Preflight je odbijao **svako** snimanje na vanjski disk s porukom „0 GB". Uzrok:
+`volumeAvailableCapacityForImportantUsageKey` postoji samo na APFS/HFS+; na exFAT-u
+vrati 0 umjesto `nil`, pa je provjera „ima li 20 GB" uvijek padala. A vanjski disk
+je jedino mjesto gdje epizoda od tri sata i pripada.
+
+> Pravilo: `resourceValues` ključ koji ne postoji na tom filesystemu ne javlja
+> grešku — vrati bezopasno izgledajuću nulu. Uvijek imaj fallback (`volumeAvailableCapacityKey`).
+
+### 10. Statistike pročitane nakon otpuštanja recordera
+
+`stopRecording()` je zvao `teardownRecorders()` (koji radi `recorders.removeAll()`)
+**prije** `writeFinalTrackStatistics()`. Statistike se čitaju s tih istih objekata,
+pa je rječnik bio prazan i manifest je ostajao bez `firstSampleHostNanos`,
+`sampleCount`, `measuredSampleRate` i `driftPPM` za svaki mikrofon.
+
+Ništa nije puklo. `finalize_session.sh` za `firstSampleHostNanos = None` uzima
+`offset = 0.0`, pa bi svaka snimka izašla tiho pomaknuta za stvarnu razliku
+starta — ovdje izmjereno **+214 ms i +398 ms**. To je 5–10× iznad praga
+vidljivosti.
+
+> Pravilo: redoslijed „oslobodi pa pročitaj" ne javlja grešku ni u Swiftu ni u
+> Pythonu — samo vrati prazno. Test koji gleda samo „je li datoteka nastala" ovo
+> nikad ne uhvati; treba gledati sadržaj manifesta.
+
+### 11. `nominalFrameRate` je maksimum formata, ne ono što kamera šalje
+
+Elgato 4K X u `activeFormat` javlja **120 fps** na 3840×2160 — to je što *capture
+uređaj* može, ne što GH5 na drugom kraju kabela šalje. Stvarno izmjereno: **29,970
+fps** (točno NTSC 30000/1001, potvrđeno neovisno ffprobeom). Manifest je taj broj
+prenosio dalje u postprodukciju, a encoder ga je dobivao kao
+`AVVideoExpectedSourceFrameRateKey`.
+
+Zanimljivo: ista sesija, dva pokretanja, jednom javi 30 a jednom 120 — ovisno o
+tome koji je format uređaj zatekao aktivnim. Nestabilan broj je gori od krivog.
+
+> Pravilo: sve što dolazi iz `activeFormat` je sposobnost, ne mjerenje. Mjeri protiv
+> host clocka i zapiši `measuredFrameRate`, kao što se već radilo za `measuredSampleRate`.
+
+### 12. Manifest je bilježio segmente koje nitko nije zapisao
+
+`UploadQueue.enqueue` počinje s `guard client != nil else { return }`, pa se s
+isključenim R2 fMP4 chunkovi tiho odbace. Manifest ih je svejedno upisivao s
+`relativePath: "segments/video/…"` — 18 segmenata s putanjama do datoteka koje ne
+postoje. Oporavak sesije ide upravo po tim putanjama.
+
+> Pravilo: ako zapis u manifestu ovisi o tome je li neki drugi sloj *stvarno* nešto
+> zapisao, gate-aj ga istim uvjetom. `relativePath` je `String?` — nil je ispravan
+> odgovor kad datoteke nema.
+
+### 13. `ArrayTooSmall` na predimenzioniranom bufferu — lip sync nikad nije radio
+
+Najskuplji bug u cijelom projektu, i najbolje skriven.
+
+`forwardAudioForMonitoring` je rezervirao `AudioBufferList` s mjesta za 8 buffera
+„za svaki slučaj". `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer`
+provjerava `bufferListSize` na **jednakost**, ne na „ima li dovoljno mjesta", pa je
+odbijao **svaki** sample buffer s `kCMSampleBufferError_ArrayTooSmall` (−12737):
+dali smo 152 bajta, tražio je točno 24 (interleaved stereo = jedan buffer).
+
+Ime greške kaže suprotno od onoga što se dogodilo — „premalo polje" na polju koje
+je šest puta preveliko.
+
+Posljedica: korelator **nikad** nije dobio nijedan uzorak s kamere. Live lip sync
+meter je stajao na 0,00, `syncMeasurements` je ostajao prazan, a poruka pri
+zaustavljanju je krivca tražila na drugom mjestu — „provjeri je li HDMI zvuk iz
+kamere bio odabran". Dijagnostika koja optužuje hardver za vlastiti bug pošalje te
+u krivom smjeru na sate.
+
+Nakon popravka: **15/15 pouzdanih mjerenja, +153,0 ms**, stabilno kroz snimku.
+
+> Pravilo: kod CoreMedia „size needed" API-ja uvijek pitaj prvo za veličinu
+> (`bufferListSizeNeededOut` s `bufferListOut: nil`), pa alociraj **točno** toliko.
+> Rezerva „za svaki slučaj" nije neutralna.
+>
+> I šire: kad dijagnostika krivi hardver, provjeri da put kojim podatak dolazi
+> uopće radi. Snimka je cijelo vrijeme imala uredan zvuk u `camera-proxy.mov` —
+> writer put je radio, monitor put nije, i nitko ih nije usporedio.
+
 ---
 
-## Što se ne može testirati bez hardvera
+## Izmjereno na pravom hardveru
 
-Ovo su **otvorene pretpostavke**, ne provjerene činjenice. Prva proba treba
-provjeriti točno njih:
+`./scripts/test_hardware.sh` — 75 s snimke, 2× PodMic USB + GH5 preko Elgato 4K X,
+2026-07-27. Test sam proizvede zvuk (nepravilni udari šuma kroz zvučnike), jer se
+sinkronizacija ne može izmjeriti u tihoj sobi.
 
-| Pretpostavka | Ako je pogrešna |
+| Pretpostavka | Ishod |
 |---|---|
-| `AVAudioEngine` startaju paralelno, po jedan na svoj HAL uređaj, bez Aggregate Devicea | `engine.start()` padne → spojiti `inputNode` na utišan mixer |
-| HDMI zvuk iz GH5 je poravnan s HDMI slikom | više nije pretpostavka — kalibracija pljeskom je izmjeri (Postavke → Uređaji) |
-| Elgato 4K X daje 4K/60 u `activeFormat` i HDMI zvuk je stvarno kamerin mikrofon | bez HDMI zvuka nema mjerenja lip synca — samo host clock |
-| `AVAssetWriter` prihvaća `proRes422LT` na 4K na ovom čipu | pasti na HEVC |
-| `.mpeg4AppleHLS` profil daje segmente uz odabrani kodek | nema live video backupa, audio ostaje |
-| Termika kroz 3 sata pod trajnim encodeom | ispušteni frameovi, vidljivi u `droppedFrameCount` |
-| Stvarni drift PodMic USB kristala | odlučuje je li potreban interface ili mikseta |
+| `AVAudioEngine` startaju paralelno, po jedan na svoj HAL uređaj, bez Aggregate Devicea | ✅ radi. Dva `AVAudioEngine`a, dva HAL uređaja, bez ijednog konflikta |
+| Stvarni drift PodMic USB kristala | ✅ **−21,5 i −21,0 ppm**, stabilno kroz cijelu snimku. Daleko unutar tolerancije — nikakav interface nije potreban |
+| Elgato 4K X `activeFormat` | ⚠️ javlja 3840×2160 **@ 120 fps**; stvarno stiže 29,970. Vidi bug 11 |
+| `AVAssetWriter` HEVC na 4K u realnom vremenu | ✅ **0 ispuštenih frameova** u 75 s na 4K30. **29,3 GB/h** izmjereno — stara paušalna procjena od 9 GB/h bila je tri puta preoptimistična (vidi bug 9 i `approximateGigabytesPerHour`) |
+| `.mpeg4AppleHLS` profil daje fMP4 segmente | ✅ 19 segmenata + inicijalizacijski, ispravno označen |
+| HDMI zvuk je stvarno kamerin mikrofon | ✅ **da — ali su ga blokirale dvije neovisne stvari.** Elgato 4K X je u Elgato Studiju bio na **Analog** audio ulazu umjesto HDMI (−71 dB konstantno). Nakon prebacivanja na HDMI zvuk je živ (−36 dB), ali korelator ga i dalje nije vidio zbog buga 13 |
+| Latencija mikrofon→HDMI zvuk | ✅ **+153 ms**, 15/15 pouzdanih mjerenja, stabilno 146–167 ms kroz snimku. Toliko HDMI zvuk zaostaje za mikrofonima |
+| Razlika starta tragova | ✅ +222 ms i +402 ms od početka sesije — točno ono zbog čega postoji `firstSampleHostNanos` |
 
-**Prva proba:** 20-minutna snimka, pa `manifest.json` → pogledaj `driftPPM` i
-`syncMeasurements`. Ta dva broja odlučuju sve ostalo.
+Host clock i korelator se **ne poklapaju i ne trebaju**: sat je javio −229 ms, a
+korelator +160 ms. Sat vidi samo kad je podatak stigao do drivera; +153 ms je
+stvarna latencija lanca koju sat po definiciji ne može izmjeriti. Zato korelator
+nije „provjera sata" nego jedini izvor tog broja.
+
+Preostaje kalibracija pljeskom da se +153 ms (mikrofon→HDMI **zvuk**) pretvori u
+mikrofon→**slika**. Bez nje postprodukcija pretpostavlja da je kamera interno
+poravnata.
+
+Još neprovjereno: termika kroz 3 sata pod trajnim encodeom, i `proRes422LT` na 4K.
 
 ---
 

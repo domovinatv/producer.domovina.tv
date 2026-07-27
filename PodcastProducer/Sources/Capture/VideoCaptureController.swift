@@ -54,11 +54,32 @@ final class VideoCaptureController: NSObject {
             }
         }
 
-        var approximateGigabytesPerHour: Double {
+        /// Roughly how much disk an hour of this codec costs at a given capture
+        /// format.
+        ///
+        /// This used to be one flat number per codec, quietly assuming 1080p.
+        /// On a 4K30 take the real cost is ~27 GB/h against the 9 GB/h it
+        /// claimed, so the pre-flight and the "hours left" readout were both
+        /// three times too optimistic — on a 526 GB disk that is the difference
+        /// between "238 h" and 19 h.
+        ///
+        /// HEVC reuses the very bitrate ladder the encoder is configured with,
+        /// so the estimate cannot drift away from what actually gets written.
+        /// ProRes has no rate control at all: its data rate is proportional to
+        /// pixels and frame rate, anchored on Apple's published 1080p30 figures.
+        func approximateGigabytesPerHour(width: Int, height: Int, frameRate: Double) -> Double {
+            // Fall back to 1080p30 only when the session has not reported a
+            // format yet — the same size the old constants silently assumed.
+            let pixels = width > 0 && height > 0 ? width * height : 1920 * 1080
+            let rate = frameRate > 0 ? frameRate : 30
+
             switch self {
-            case .hevc: return 9
-            case .proRes422Proxy: return 20
-            case .proRes422LT: return 45
+            case .hevc:
+                let bitsPerHour = Double(VideoCaptureController.bitrate(forPixels: pixels)) * 3600
+                return bitsPerHour / 8 / 1_000_000_000
+            case .proRes422Proxy, .proRes422LT:
+                let scale = Double(pixels) / (1920.0 * 1080.0) * rate / 30.0
+                return (self == .proRes422Proxy ? 20.0 : 45.0) * scale
             }
         }
     }
@@ -76,6 +97,30 @@ final class VideoCaptureController: NSObject {
         var nominalFrameRate: Double = 0
         var segmentsWritten = 0
         var lastError: String?
+
+        /// Frame arrivals across the whole capture session, independent of
+        /// whether a take is running. `videoFrameCount` resets when recording
+        /// starts; these do not, so the delivered rate is known from the moment
+        /// preview comes up — which is exactly when the disk pre-flight asks.
+        var sessionVideoFrameCount: UInt64 = 0
+        var sessionFirstFrameHostNanos: UInt64?
+        var sessionLastFrameHostNanos: UInt64?
+
+        /// The frame rate the camera is actually sending, measured against the
+        /// host clock.
+        ///
+        /// `nominalFrameRate` describes what the *capture device's* active
+        /// format can do: the Elgato 4K X advertises 120 fps on 3840×2160 while
+        /// a GH5 feeds it 29.97, and which of the two it reports is not even
+        /// stable between runs. Only this number describes the signal.
+        var measuredFrameRate: Double? {
+            guard let first = sessionFirstFrameHostNanos,
+                  let last = sessionLastFrameHostNanos,
+                  last > first, sessionVideoFrameCount > 1 else { return nil }
+            // Intervals, not frames: N frames span N−1 gaps between the first
+            // and last timestamp. Counting them as N inflates short measurements.
+            return Double(sessionVideoFrameCount - 1) / (Double(last - first) / 1_000_000_000.0)
+        }
     }
 
     // MARK: - Configuration
@@ -209,6 +254,9 @@ final class VideoCaptureController: NSObject {
         status.width = Int(dimensions.width)
         status.height = Int(dimensions.height)
         status.nominalFrameRate = frameRate.isFinite ? frameRate : 0
+        status.sessionVideoFrameCount = 0
+        status.sessionFirstFrameHostNanos = nil
+        status.sessionLastFrameHostNanos = nil
         stateLock.unlock()
 
         sessionQueue.async { [session] in
@@ -333,7 +381,7 @@ final class VideoCaptureController: NSObject {
         ]
         if masterCodec == .hevc {
             videoSettings[AVVideoCompressionPropertiesKey] = [
-                AVVideoAverageBitRateKey: bitrate(for: dimensions),
+                AVVideoAverageBitRateKey: Self.bitrate(forPixels: dimensions.width * dimensions.height),
                 AVVideoExpectedSourceFrameRateKey: Int(snapshot().nominalFrameRate.rounded())
             ]
         }
@@ -410,10 +458,11 @@ final class VideoCaptureController: NSObject {
         return (snapshot.width, snapshot.height)
     }
 
-    private func bitrate(for dimensions: (width: Int, height: Int)) -> Int {
-        let pixels = dimensions.width * dimensions.height
+    /// Static and keyed on pixels so the disk estimate can quote the exact
+    /// number the encoder will be handed, instead of a second guess at it.
+    static func bitrate(forPixels pixels: Int) -> Int {
         // ~0.1 bits per pixel per frame at 30fps, doubled for 4K headroom.
-        return pixels >= 3_000_000 ? 60_000_000 : 20_000_000
+        pixels >= 3_000_000 ? 60_000_000 : 20_000_000
     }
 }
 
@@ -426,7 +475,15 @@ extension VideoCaptureController: AVCaptureVideoDataOutputSampleBufferDelegate, 
         let hostNanos = HostClock.nanos(fromCaptureTime: presentationTime)
         let isVideo = output === videoOutput
 
-        if !isVideo {
+        if isVideo {
+            // Counted here rather than on the writer queue: the delivered frame
+            // rate is a property of the signal, not of whether we are recording.
+            stateLock.lock()
+            if status.sessionFirstFrameHostNanos == nil { status.sessionFirstFrameHostNanos = hostNanos }
+            status.sessionLastFrameHostNanos = hostNanos
+            status.sessionVideoFrameCount &+= 1
+            stateLock.unlock()
+        } else {
             forwardAudioForMonitoring(sampleBuffer, hostNanos: hostNanos)
         }
 
@@ -492,12 +549,36 @@ extension VideoCaptureController: AVCaptureVideoDataOutputSampleBufferDelegate, 
         let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
         guard frameCount > 0 else { return }
 
-        var blockBuffer: CMBlockBuffer?
-        let listSize = MemoryLayout<AudioBufferList>.size + MemoryLayout<AudioBuffer>.size * 8
+        // Ask for the exact size first. This API validates `bufferListSize`
+        // against what the buffer actually needs and rejects anything that is
+        // not equal — an over-sized allocation fails with
+        // kCMSampleBufferError_ArrayTooSmall (−12737) exactly like an
+        // under-sized one, which reads as the opposite of what happened.
+        //
+        // Reserving room for 8 buffers, as this used to, therefore failed on
+        // every single sample buffer: interleaved stereo needs one buffer (24
+        // bytes) and we handed it 152. The correlator never received one
+        // camera sample, so the live lip-sync meter sat at 0.00 confidence and
+        // the manifest got no `syncMeasurements` — while the warning shown on
+        // stop blamed the camera's HDMI audio.
+        var listSize = 0
+        guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &listSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: nil
+        ) == noErr, listSize > 0 else { return }
+
         let listMemory = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
         defer { listMemory.deallocate() }
         let listPointer = listMemory.assumingMemoryBound(to: AudioBufferList.self)
 
+        // Held until the end of scope: it owns the memory `mData` points into.
+        var blockBuffer: CMBlockBuffer?
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
             bufferListSizeNeededOut: nil,

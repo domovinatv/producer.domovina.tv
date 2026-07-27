@@ -128,7 +128,24 @@ final class HealthMonitor {
         while !FileManager.default.fileExists(atPath: probe.path), probe.pathComponents.count > 1 {
             probe = probe.deletingLastPathComponent()
         }
-        let values = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return values?.volumeAvailableCapacityForImportantUsage
+
+        let values = try? probe.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey
+        ])
+
+        // `forImportantUsage` is the better number on APFS — it counts space
+        // that purgeable caches would give back. But it is APFS/HFS+ only, and
+        // on anything else (a plain exFAT recording drive, which is exactly
+        // what gets carried between a Mac and a camera) it comes back as 0.
+        // Trusting that 0 made the pre-flight refuse every take on an external
+        // disk, which is the one place a three-hour episode actually belongs.
+        if let important = values?.volumeAvailableCapacityForImportantUsage, important > 0 {
+            return important
+        }
+        if let plain = values?.volumeAvailableCapacity, plain > 0 {
+            return Int64(plain)
+        }
+        return nil
     }
 }

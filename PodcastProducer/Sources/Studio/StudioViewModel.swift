@@ -242,7 +242,16 @@ final class StudioViewModel: ObservableObject {
 
     var estimatedGigabytesPerHour: Double {
         let audio = Double(assignedMicrophones.count) * 1.1   // continuous + segment copy
-        let video = isPreviewing || isRecording ? masterCodec.approximateGigabytesPerHour : 0
+        guard isPreviewing || isRecording else { return audio }
+
+        // Measured rate, not the format's ceiling: at 4K the difference between
+        // 30 and the advertised 120 fps is a fourfold error in the ProRes
+        // estimate, and this number is what the disk pre-flight refuses takes on.
+        let video = masterCodec.approximateGigabytesPerHour(
+            width: videoStatus.width,
+            height: videoStatus.height,
+            frameRate: videoStatus.measuredFrameRate ?? videoStatus.nominalFrameRate
+        )
         return audio + video
     }
 
@@ -382,7 +391,11 @@ final class StudioViewModel: ObservableObject {
         }
 
         let masterURL = store.videoURL.appendingPathComponent("camera-proxy.mov")
-        let uploadDuringRecording = r2Configuration.uploadDuringRecording
+        // The fMP4 chunks exist only in memory until the uploader stages them,
+        // and the uploader drops everything when R2 is off. Recording a local
+        // path for a file that was never written makes the manifest claim
+        // segments that recovery would then fail to find.
+        let uploadDuringRecording = r2Configuration.uploadDuringRecording && r2Configuration.isUsable
         let stagingRoot = store.segmentsURL.appendingPathComponent("video", isDirectory: true)
 
         videoController.onSegmentReady = { [weak self] data, index, hostNanos, isInitialization in
@@ -398,7 +411,7 @@ final class StudioViewModel: ObservableObject {
                 guard let trackIndex = manifest.tracks.firstIndex(where: { $0.id == "camera-proxy" }) else { return }
                 manifest.tracks[trackIndex].segments.append(
                     .init(index: index,
-                          relativePath: "segments/video/\(name)",
+                          relativePath: uploadDuringRecording ? "segments/video/\(name)" : nil,
                           remoteKey: key,
                           byteCount: data.count,
                           startHostNanos: hostNanos,
@@ -451,11 +464,11 @@ final class StudioViewModel: ObservableObject {
         let store = self.store
         let stopHostNanos = HostClock.now()
 
-        await teardownRecorders()
+        let finalSnapshots = await teardownRecorders()
 
         store?.mutate { $0.stoppedAtHostNanos = stopHostNanos }
         store?.log("Snimanje zaustavljeno")
-        writeFinalTrackStatistics()
+        writeFinalTrackStatistics(microphones: finalSnapshots)
 
         // Say out loud whether post has what it needs to fix lip sync, because
         // discovering it does not is a lot worse in the edit than here.
@@ -481,17 +494,31 @@ final class StudioViewModel: ObservableObject {
         }
     }
 
-    private func teardownRecorders() async {
+    /// Returns each microphone's final counters, because after this the
+    /// recorders are gone and the numbers with them.
+    @discardableResult
+    private func teardownRecorders() async -> [String: AudioTrackRecorder.Status] {
         for recorder in recorders.values { recorder.stop() }
+
+        // Read the statistics here, while the recorders still exist. `stop()`
+        // has already drained the writer queue, so these are the final counts.
+        // Taking them after `removeAll()` — which is what this method used to
+        // do — returned an empty dictionary, and the manifest lost every
+        // microphone's `firstSampleHostNanos`, sample count and drift.
+        // Nothing failed visibly: finalize_session.sh treats a missing
+        // `firstSampleHostNanos` as offset 0, so every take came out silently
+        // misaligned by whatever the real start delta was.
+        let snapshots = recorderSnapshots
+
         await videoController.stopRecording()
         recorders.removeAll()
+        return snapshots
     }
 
     /// Freezes the measured drift and sample counts into the manifest — the
     /// numbers post-production needs to resample each mic onto one timeline.
-    private func writeFinalTrackStatistics() {
+    private func writeFinalTrackStatistics(microphones snapshots: [String: AudioTrackRecorder.Status]) {
         guard let store else { return }
-        let snapshots = recorderSnapshots
         let videoSnapshot = videoController.snapshot()
 
         store.mutate { manifest in
@@ -507,6 +534,7 @@ final class StudioViewModel: ObservableObject {
                 manifest.tracks[index].firstSampleHostNanos = videoSnapshot.firstVideoHostNanos
                 manifest.tracks[index].lastSampleHostNanos = videoSnapshot.lastVideoHostNanos
                 manifest.tracks[index].sampleCount = videoSnapshot.videoFrameCount
+                manifest.tracks[index].measuredFrameRate = videoSnapshot.measuredFrameRate
             }
         }
     }
