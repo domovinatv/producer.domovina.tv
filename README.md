@@ -38,6 +38,30 @@ open "build/Domovina Studio.app"
 ./scripts/test.sh               # testovi, ne diraju hardver
 ```
 
+### Cloudflare R2
+
+Bucket se radi jednom, wranglerom:
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=<account> wrangler r2 bucket create domovina-studio-sessions --location eeur
+```
+
+Pristupne ključeve wrangler **ne može** napraviti — R2 S3 kredencijali se rade u
+dashboardu (R2 → API → Manage API Tokens → Object Read & Write, ograničeno na taj
+bucket). S njima:
+
+```bash
+./scripts/setup_r2.sh          # konfiguracija + Keychain + provjera pravim krugom
+./scripts/setup_r2.sh --verify-only
+```
+
+Provjera radi PUT, GET, usporedbu bajtova i DELETE protiv stvarnog bucketa —
+potpis, endpoint i dopuštenja tokena odjednom, jer upravo ta kombinacija pukne.
+
+Tijekom snimanja idu audio segmenti i video proxy chunkovi (~5 Mbps). Puni 4K
+masteri ostaju lokalno; `--upload-masters` ih šalje i na R2, ali to je ~29 GB po
+satu snimke.
+
 Nakon snimanja:
 
 ```bash
