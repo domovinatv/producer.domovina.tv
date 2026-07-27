@@ -141,5 +141,16 @@ cd PodcastProducer && swift run
 ./scripts/test_calibration.sh # kalibracija pljeskom na sintetičkom klipu
 ```
 
+Sve gore ne dira hardver. Za provjeru cijelog lanca na stvarnim uređajima:
+
+```bash
+./scripts/test_hardware.sh --seconds 75
+```
+
+Otvori oba mikrofona i Elgato, snimi pravu sesiju i provjeri je dvaput —
+manifestom i neovisno `ffprobe`om. Sam proizvede zvuk kroz zvučnike (mikrofoni i
+kamera čuju isti signal), pa izmjeri i lip sync. Ne pokretati tijekom snimanja:
+uređaji su ekskluzivni.
+
 ## 📝 License
 This project is open-sourced under the MIT License.
