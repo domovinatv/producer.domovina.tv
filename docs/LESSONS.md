@@ -36,6 +36,30 @@ resample odnos:
 **Prijelaz je oko 50 minuta** (prag u skripti je 8 ms). Zato podcast od 20 minuta
 nikad nije otkrio problem, a epizoda od 3 sata bi ga otkrila u montaži.
 
+### Bitrate proxyja — koliko je dovoljno
+
+Izmjereno na stvarnoj 4K30 snimci iz ovog studija, VMAF (4K model) protiv starog
+izlaza od 60 Mbit/s:
+
+| bitrate | GB/h | VMAF | |
+|---|---|---|---|
+| 6 Mbit/s | 2,6 | 93,75 | vidljivo mekše |
+| 8 Mbit/s | 3,4 | 96,20 | otprilike gdje je Riverside |
+| **12 Mbit/s** | **5,1** | **97,43** | **odabrano** |
+| 20 Mbit/s | 8,6 | 98,36 | +0,9 VMAF za +3,5 GB/h |
+| 30 Mbit/s | 12,8 | 98,66 | +0,3 VMAF za još +4,2 GB/h |
+
+Krivulja je ravna nakon 12. Statična kamera na dvoje ljudi koji pričaju je
+otprilike najlakše što encoder može dobiti — gotovo sve iznad toga odlazi u šum
+senzora.
+
+Cijela sesija: **7,5 GB/h** (video 5,5 + audio 2,0), tj. **15 GB za epizodu od
+120 minuta** umjesto 58 GB.
+
+Bitno je što je ta datoteka: master je SD kartica u kameri, a ovo je vremenska
+referenca za poravnanje i rezerva ako kartica zakaže. Pri 12 Mbit/s je i dalje
+mirno objavljiva sama za sebe.
+
 ### Perceptivni pragovi
 
 Zvuk koji **pretječe** sliku smeta oko dvostruko više od zvuka koji zaostaje —
@@ -208,7 +232,7 @@ sinkronizacija ne može izmjeriti u tihoj sobi.
 | `AVAssetWriter` HEVC na 4K u realnom vremenu | ✅ **0 ispuštenih frameova** u 75 s na 4K30. **29,3 GB/h** izmjereno — stara paušalna procjena od 9 GB/h bila je tri puta preoptimistična (vidi bug 9 i `approximateGigabytesPerHour`) |
 | `.mpeg4AppleHLS` profil daje fMP4 segmente | ✅ 19 segmenata + inicijalizacijski, ispravno označen |
 | HDMI zvuk je stvarno kamerin mikrofon | ✅ **da — ali su ga blokirale dvije neovisne stvari.** Elgato 4K X je u Elgato Studiju bio na **Analog** audio ulazu umjesto HDMI (−71 dB konstantno). Nakon prebacivanja na HDMI zvuk je živ (−36 dB), ali korelator ga i dalje nije vidio zbog buga 13 |
-| Latencija mikrofon→HDMI zvuk | ✅ **+153 ms**, 15/15 pouzdanih mjerenja, stabilno 146–167 ms kroz snimku. Toliko HDMI zvuk zaostaje za mikrofonima |
+| Latencija mikrofon→HDMI zvuk | ✅ **+153 ms** i **+225 ms** u dva pokretanja, unutar snimke stabilno na ±10 ms. Konstanta je po sesiji, ne po sustavu — zato se mjeri svaki put i sprema u manifest, umjesto da se jednom izmjeri i zapamti |
 | Razlika starta tragova | ✅ +222 ms i +402 ms od početka sesije — točno ono zbog čega postoji `firstSampleHostNanos` |
 
 Host clock i korelator se **ne poklapaju i ne trebaju**: sat je javio −229 ms, a
