@@ -31,6 +31,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 
 cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/PodcastProducer"
 cp "$PACKAGE_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+cp "$PACKAGE_DIR/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
 
 # Ad-hoc potpis. Bez potpisa macOS ponekad odbije TCC zahtjev bez ikakve poruke,

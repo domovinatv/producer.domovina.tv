@@ -43,12 +43,15 @@ struct RootView: View {
 
     private var header: some View {
         HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Domovina Studio")
-                    .font(.headline)
-                Text("Realtime podcast companion")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                BrandMark(size: 32)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Domovina Studio")
+                        .font(.headline)
+                    Text("Realtime podcast companion")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
@@ -61,6 +64,7 @@ struct RootView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 220)
+            .tint(Brand.blue)
 
             // A recording in progress must be obvious from anywhere in the app.
             if studioModel.isRecording {
