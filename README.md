@@ -89,8 +89,11 @@ Nakon snimanja:
 
 ## 🛠️ Naslijeđeni tijek: podcast_sync.sh (Riverside.fm)
 
-Za snimke koje su išle preko Riverside.fm. Ostaje u repozitoriju i dostupan je u
-aplikaciji pod tabom **Post → Riverside (naslijeđeno)**.
+Za snimke koje su išle preko Riverside.fm. Skripta ostaje u repozitoriju i
+pokreće se iz komandne linije (primjer niže). Tab u aplikaciji je uklonjen — taj
+je arhiv zatvoren i ništa se novo tako ne snima. Kod graditelja naredbe i dalje
+stoji u `PostProcessView.swift`; vraća se dodavanjem `.riverside` u
+`Mode.selectable`.
 
 ## 🛑 The Problem
 Relying 100% on cloud podcast recorders (like Riverside.fm) can be risky due to connection drops or "mic bleed" causing poor track separation. Local recordings are safer and offer better quality, but:
@@ -151,7 +154,7 @@ All runs are logged to `sync_YYYYMMDD_HHMMSS.log` in the output directory. Tempo
 Native macOS SwiftUI aplikacija s dva taba:
 
 * **Studio** — snimanje u realnom vremenu (vidi gore).
-* **Post** — dovršavanje sesije, ili naslijeđeni Riverside tijek.
+* **Post** — dovršavanje sesije: poravnanje GH5 kartice s proxyjem i pregled sinkronizacije.
 
 ### Requirements
 * macOS 14 (Sonoma) or later

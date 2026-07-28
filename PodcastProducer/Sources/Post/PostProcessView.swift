@@ -5,12 +5,14 @@ import UniformTypeIdentifiers
 
 /// Post-production hand-off.
 ///
-/// Two paths, because the studio has two eras of recording:
-/// * **Sesija** — a take recorded by this app. The manifest already holds exact
-///   host-clock offsets, so the only unknown left is where the GH5's SD-card
-///   file starts relative to the captured proxy.
-/// * **Riverside (naslijeđeno)** — the original `podcast_sync.sh` flow for takes
-///   that were backed up to Riverside.fm instead.
+/// One path in the UI: a **Sesija** recorded by this app. The manifest already
+/// holds exact host-clock offsets, so the only unknown left is where the GH5's
+/// SD-card file starts relative to the captured proxy.
+///
+/// The older **Riverside** flow — a builder for the original `podcast_sync.sh`
+/// command, for takes that were backed up to Riverside.fm — is still compiled
+/// and wired below, but no longer reachable: nothing new is recorded that way.
+/// See `Mode.selectable` for how to put it back.
 struct PostProcessView: View {
     var sessionFolder: URL?
 
@@ -48,18 +50,28 @@ struct PostProcessView: View {
             case .riverside: return "Riverside (naslijeđeno)"
             }
         }
+
+        /// What the picker offers. Riverside is retired from the UI but kept in
+        /// the codebase — the archive it services is finite and already
+        /// recorded, and `podcast_sync.sh` still runs from the command line.
+        /// Adding `.riverside` here brings the tab back.
+        static let selectable: [Mode] = [.session]
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $mode) {
-                ForEach(Mode.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(16)
+            // With a single mode there is nothing to choose, so the picker
+            // stays out of the way rather than showing one lonely segment.
+            if Mode.selectable.count > 1 {
+                Picker("", selection: $mode) {
+                    ForEach(Mode.selectable) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(16)
 
-            Divider()
+                Divider()
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
