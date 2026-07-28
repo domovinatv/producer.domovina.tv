@@ -20,6 +20,10 @@ teorija.
 | `-itsscale X` uz `-c copy` | skalira trajanje točno za X | 100 s → 100,099935 s pri X=1.001. Ni jedan frame se ne renderira. |
 | `AVAssetImageGenerator` s nultim tolerancijama | vraća točno traženi frame | 13 frameova oko trenutka = 13 različitih trenutaka. S ne-nultom tolerancijom vratio bi isti keyframe i tiho uništio mjerenje. |
 | Brzina zvuka u kalibraciji | ~2,9 ms/m | Pljesak na 2 m unosi 6 ms greške. Zato „blizu kamere" nije savjet nego zahtjev. |
+| Gain PodMica USB kroz CoreAudio | **22–63 dB, promjenjiv** | `kAudioDevicePropertyVolumeDecibels`, ulazni scope, element 0. Upis prolazi i dok RØDE Connect radi. RØDE Connect sam **nema** AppleScript rječnik ni URL shemu. Vidi `scripts/mic_gain.swift`. |
+| ID-evi audio uređaja | **nisu stabilni** | Isti PodMic bio 184 pa 186 u istoj sesiji. Nabrajaj iznova, ne pamti ID. |
+| AAC enkoder i true peak | **+0,7 do +1,5 dB nakon limitera** | Limiter na −2 dBFS → izmjereno −0,6 dBTP na gotovom 384k AAC-u. Isto što `fetch.domovina.tv/docs/loudness_normalization_2026-05.md` zove „zamka 3". |
+| Korelacija mikrofon↔kamerin zvuk | **±15 ms, ne bolje** | Različiti mikrofoni, različit signal → vrh korelacije je širok. Dva vrha unutar 12 ms znala su biti jednake visine. Za finiju provjeru usporedi izlaz s **istim** signalom (miksom), ne s kamerom. |
 
 ### Nelinearnost drifta kroz snimku
 
@@ -215,6 +219,34 @@ Nakon popravka: **15/15 pouzdanih mjerenja, +153,0 ms**, stabilno kroz snimku.
 > I šire: kad dijagnostika krivi hardver, provjeri da put kojim podatak dolazi
 > uopće radi. Snimka je cijelo vrijeme imala uredan zvuk u `camera-proxy.mov` —
 > writer put je radio, monitor put nije, i nitko ih nije usporedio.
+
+### 14. „Prostor za normalizaciju" koji je pojačao umjesto spustio
+
+`rebuild_mix.sh` je izvorno htio spustiti gotov miks na fiksnih −20 LUFS, „da
+finalna normalizacija ima prostora". Miks je bio na −42,3 LUFS, pa je izračun
+`-20 − (−42,3)` dao **+22,3 dB** — pojačanje, ne spuštanje. Bez limitera. Rezultat
+je bio tvrdo klipanje kroz cijelu snimku: sample peak točno 0,000 dB, true peak
++1,0 dBFS.
+
+Poruka u logu je govorila „spuštam za 22.3 dB" jer je tekst bio napisan uz
+pretpostavku da je vrijednost negativna. **Ispis je tvrdio suprotno od onoga što je
+kod radio.**
+
+> Uhvaćeno mjerenjem izlaza, ne pregledom koda — `ebur128` je pokazao vrh iznad
+> nule, što u 24-bitnom PCM-u nije moguće bez klipanja.
+>
+> Pravilo koje je iz toga ušlo u lanac: **normalizaciju radi točno jedan alat.**
+> `rebuild_mix.sh` sada namjerno ostavlja miks na prirodnoj razini; pojačanje i
+> limiter su samo u `finalize_backup.sh`.
+
+### 15. Denoise modeli hranjeni signalom 30 dB pretihim
+
+Prvi krug testova čišćenja šuma davao je DeepFilterNetu i RNNoiseu miks na
+**−47 LUFS**. Modeli su trenirani na govoru normalne razine i takav signal čitaju kao
+šum — jedan ga je uništio, drugi nije prepoznao ništa.
+
+> Redoslijed je obavezan: **pojačaj na ~−20 LUFS → očisti → normaliziraj na cilj.**
+> Vidi [`CISCENJE_ZVUKA.md`](CISCENJE_ZVUKA.md).
 
 ---
 

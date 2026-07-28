@@ -37,6 +37,8 @@ LOUD_TARGET=-14      # YouTube referenca; katalog u fetch.domovina.tv vozi -16
 LOUD_TP=-2           # headroom za AAC: enkoder podiže true peak NAKON limitera
 KEEP_CAMERA_AUDIO=false
 EXTRA_MS=0
+TRIM_START=0       # koliko odrezati s početka gotovog videa
+TRIM_END=""        # gdje završiti (prazno = do kraja)
 WINDOW=60          # duljina korelacijskog prozora
 MARGIN=45          # koliko se traži lijevo/desno od predviđenog mjesta
 
@@ -62,6 +64,8 @@ Upotreba:
   --loudness-target    Drugi cilj u LUFS, npr. -16 (kućni standard kataloga).
   --keep-camera-audio  Zadrži i kamerin zvuk kao drugi audio trag.
   --offset-ms          Ručna korekcija povrh izmjerene (+ = zvuk kasnije).
+  --start              Odreži s početka: sekunde ili HH:MM:SS.
+  --end                Završi izlaz na toj točki: sekunde ili HH:MM:SS.
   --no-drift           Preskoči drugu korelaciju, koristi samo jedan pomak.
   --dry-run            Izmjeri i ispiši sve, ali ne stvaraj ništa.
 EOF
@@ -81,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --loudness-target)    LOUD_TARGET="${2:-}"; LOUDNESS=true; shift 2 ;;
         --keep-camera-audio)  KEEP_CAMERA_AUDIO=true; shift ;;
         --offset-ms)          EXTRA_MS="${2:-}"; shift 2 ;;
+        --start)              TRIM_START="${2:-}"; shift 2 ;;
+        --end)                TRIM_END="${2:-}"; shift 2 ;;
         --no-drift)           NO_DRIFT=true; shift ;;
         --dry-run)            DRY_RUN=true; shift ;;
         --help|-h)            usage 0 ;;
@@ -286,6 +292,42 @@ fi
 
 audio_time_for() { python3 -c "print(repr($AUDIO_SS + $RATIO * $1 - $RATIO * $VIDEO_SS))"; }
 
+# --- 4c. REZ ---
+# Rez se zadaje u vremenu gotovog videa. Video se pomiče za TRIM_START na svojoj
+# osi, a zvuk za RATIO * TRIM_START na svojoj — ista sekunda, dvije vremenske osi.
+# Kad bi se oba pomaknula za isti broj, sam rez bi razbio sinkron.
+to_seconds() {
+    python3 -c "
+import sys
+v = sys.argv[1].strip()
+if ':' in v:
+    t = 0.0
+    for part in v.split(':'):
+        t = t * 60 + float(part)
+    print(repr(t))
+else:
+    print(repr(float(v)))" "$1"
+}
+
+TRIM_START="$(to_seconds "$TRIM_START")"
+TRIM_DURATION=""
+if [[ -n "$TRIM_END" ]]; then
+    TRIM_END="$(to_seconds "$TRIM_END")"
+    TRIM_DURATION="$(python3 -c "print(repr($TRIM_END - $TRIM_START))")"
+    python3 -c "import sys; sys.exit(0 if $TRIM_DURATION > 0 else 1)" || {
+        echo "❌ --end je prije --start."; exit 1
+    }
+fi
+
+if python3 -c "import sys; sys.exit(0 if $TRIM_START > 0 else 1)" || [[ -n "$TRIM_DURATION" ]]; then
+    printf "✂️  Rez: od %.3f s" "$TRIM_START"
+    [[ -n "$TRIM_DURATION" ]] && printf " do %.3f s → %.3f s izlaza" "$TRIM_END" "$TRIM_DURATION"
+    echo ""
+    VIDEO_SS="$(python3 -c "print(repr($VIDEO_SS + $TRIM_START / $RATIO))")"
+    AUDIO_SS="$(python3 -c "print(repr($AUDIO_SS + $RATIO * $TRIM_START))")"
+    echo ""
+fi
+
 # --- 5. GLASNOĆA ---
 # Mjeri se uvijek, primjenjuje samo uz --loudness. Mjerenje traje ~20 s na sat
 # vremena zvuka, a bez njega se ne zna je li mix uopće upotrebljiv: RØDE Connect
@@ -447,11 +489,15 @@ if [[ "$KEEP_CAMERA_AUDIO" == true ]]; then
                  -metadata:s:a:1 title="Kamera (referenca)")
 fi
 
+DURATION_ARGS=()
+[[ -n "$TRIM_DURATION" ]] && DURATION_ARGS=(-t "$TRIM_DURATION")
+
 ffmpeg -v warning -stats \
     "${INPUT_ARGS[@]}" \
     -ss "$AUDIO_SS" -i "$AUDIO_WAV" \
     "${MAP_ARGS[@]}" \
     "${CODEC_ARGS[@]}" \
+    "${DURATION_ARGS[@]}" \
     -shortest -y "$FINAL_OUT" || { echo "❌ Spajanje nije uspjelo."; exit 1; }
 
 echo ""
