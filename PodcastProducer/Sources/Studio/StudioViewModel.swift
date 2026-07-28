@@ -938,17 +938,32 @@ enum ScriptLocator {
         candidates(named: "scripts/finalize_session.sh").first
     }
 
+    static func backupScriptPath() -> String? {
+        candidates(named: "scripts/finalize_backup.sh").first
+    }
+
+    static func prepareYouTubeScriptPath() -> String? {
+        candidates(named: "scripts/prepare_youtube.sh").first
+    }
+
     static func syncScriptPath() -> String? {
         candidates(named: "podcast_sync.sh").first
     }
 
     private static func candidates(named relativePath: String) -> [String] {
         let cwd = FileManager.default.currentDirectoryPath
-        let possibilities = [
+        var possibilities = [
             "\(cwd)/\(relativePath)",
             "\(cwd)/../\(relativePath)",
             "\(NSHomeDirectory())/git/domovinatv/producer.domovina.tv/\(relativePath)"
         ]
+        // Installed in /Applications the cwd is "/", so the repo-relative
+        // candidates miss; build_app.sh copies scripts/ into Resources for
+        // exactly this case. The repo copy stays preferred — during development
+        // it is newer than whatever was bundled at build time.
+        if let resources = Bundle.main.resourceURL {
+            possibilities.append(resources.appendingPathComponent(relativePath).path)
+        }
         return possibilities
             .map { ($0 as NSString).standardizingPath }
             .filter { FileManager.default.fileExists(atPath: $0) }

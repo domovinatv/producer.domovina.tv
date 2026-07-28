@@ -47,6 +47,13 @@ cp "$PACKAGE_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 cp "$PACKAGE_DIR/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
 
+# Post skripte idu u bundle: instalirana aplikacija ima cwd "/", pa ScriptLocator
+# bez ove kopije ne bi našao ništa kad repozitorija nema. Repo kopija i dalje ima
+# prednost — tijekom razvoja je novija od bundlane.
+mkdir -p "$APP_BUNDLE/Contents/Resources/scripts"
+cp "$REPO_ROOT/scripts/"*.sh "$REPO_ROOT/scripts/"*.py "$APP_BUNDLE/Contents/Resources/scripts/"
+chmod +x "$APP_BUNDLE/Contents/Resources/scripts/"*.sh "$APP_BUNDLE/Contents/Resources/scripts/"*.py
+
 # Ad-hoc potpis. Bez potpisa macOS ponekad odbije TCC zahtjev bez ikakve poruke,
 # a dopuštenja se resetiraju pri svakom buildu.
 echo "🔐 Ad-hoc potpisivanje…"

@@ -3,11 +3,20 @@ import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
 
-/// Post-production hand-off.
+/// Post-production, run from inside the app.
 ///
-/// One path in the UI: a **Sesija** recorded by this app. The manifest already
-/// holds exact host-clock offsets, so the only unknown left is where the GH5's
-/// SD-card file starts relative to the captured proxy.
+/// Two live paths:
+///
+/// * **Sesija** — recorded by this app; the manifest holds exact host-clock
+///   offsets, so the only unknown left is where the GH5's SD-card file starts
+///   relative to the captured proxy. Runs `finalize_session.sh`.
+/// * **Backup** — the session did NOT go through the app: only the camera's
+///   SD master and RØDE Connect's mix exist. Everything is measured by
+///   correlation. Runs `finalize_backup.sh`.
+///
+/// Both end in a `*_youtube.mp4` and can then feed **Priprema za YouTube**
+/// (Modal transcription + AI metadata). The scripts remain the single source
+/// of truth for every ffmpeg invocation — the app launches and shows them.
 ///
 /// The older **Riverside** flow — a builder for the original `podcast_sync.sh`
 /// command, for takes that were backed up to Riverside.fm — is still compiled
@@ -22,6 +31,18 @@ struct PostProcessView: View {
     @State private var lumixVideos: [String] = []
     @State private var copied = false
     @State private var loadError: String?
+
+    // In-app script execution
+    @StateObject private var exportRunner = ScriptRunner()
+    @StateObject private var prepRunner = ScriptRunner()
+    @State private var makeYouTube = true
+
+    // Backup flow (no manifest — camera SD master + RØDE Connect mix)
+    @State private var backupAudioWav = ""
+    @State private var backupOutputDir = ""
+    @State private var backupLoudness = true
+    @State private var backupStart = ""
+    @State private var backupEnd = ""
 
     // Lip sync preview
     @State private var preview: SyncPreviewPlayer.Result?
@@ -42,11 +63,13 @@ struct PostProcessView: View {
 
     enum Mode: String, CaseIterable, Identifiable {
         case session
+        case backup
         case riverside
         var id: String { rawValue }
         var title: String {
             switch self {
             case .session: return "Sesija iz Studija"
+            case .backup: return "Backup (RØDE + SD)"
             case .riverside: return "Riverside (naslijeđeno)"
             }
         }
@@ -55,7 +78,7 @@ struct PostProcessView: View {
         /// the codebase — the archive it services is finite and already
         /// recorded, and `podcast_sync.sh` still runs from the command line.
         /// Adding `.riverside` here brings the tab back.
-        static let selectable: [Mode] = [.session]
+        static let selectable: [Mode] = [.session, .backup]
     }
 
     var body: some View {
@@ -77,6 +100,7 @@ struct PostProcessView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     switch mode {
                     case .session: sessionFlow
+                    case .backup: backupFlow
                     case .riverside: riversideFlow
                     }
                 }
@@ -115,7 +139,9 @@ struct PostProcessView: View {
                 Divider()
                 lumixSection
                 Divider()
-                commandSection(command: sessionCommand)
+                sessionExportSection
+                Divider()
+                YouTubePrepSection(defaultInput: exportRunner.producedFile, runner: prepRunner)
             } else {
                 Text("Odaberi mapu sesije (sadrži manifest.json) koju je snimio Studio tab.")
                     .font(.callout)
@@ -455,14 +481,221 @@ struct PostProcessView: View {
         }
     }
 
-    private var sessionCommand: String? {
+    // MARK: - Session export (in-app)
+
+    /// Arguments for `finalize_session.sh`, shared by the in-app runner and
+    /// the copyable command line so the two can never diverge.
+    private var sessionArguments: [String]? {
         guard let folder = manifestFolder, !lumixVideos.isEmpty else { return nil }
+        var arguments = ["--session", folder.path]
+        for video in lumixVideos { arguments += ["--lumix", video] }
+        if let override = syncOverrideMilliseconds {
+            arguments += ["--sync-offset-ms", String(format: "%.0f", override)]
+        }
+        if makeYouTube { arguments.append("--youtube") }
+        return arguments
+    }
+
+    /// Non-nil when the nudge slider was moved away from the measured offset:
+    /// the human overruled the correlator by ear, and that decision has to
+    /// reach the script, not just the preview.
+    private var syncOverrideMilliseconds: Double? {
+        guard preview != nil else { return nil }
+        let measured = manifest?.resolvedSyncOffsetMilliseconds ?? 0
+        return abs(nudgeMilliseconds - measured) > 0.5 ? nudgeMilliseconds : nil
+    }
+
+    private var sessionCommand: String? {
+        guard let arguments = sessionArguments else { return nil }
         let script = ScriptLocator.finalizeScriptPath() ?? "./scripts/finalize_session.sh"
-        var parts = ["time", script, "\\\n  --session", "\"\(folder.path)\""]
-        for video in lumixVideos {
-            parts.append(contentsOf: ["\\\n  --lumix", "\"\(video)\""])
+        return displayCommand(script: script, arguments: arguments)
+    }
+
+    private var sessionExportSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Izvoz", systemImage: "square.and.arrow.up")
+                .font(.headline)
+            Text("Drift, poravnanje, miks i mux sa SD masterom — video se ne renderira. Pokreće scripts/finalize_session.sh.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Napravi i YouTube datoteku (−14 LUFS, AAC 384k, faststart)", isOn: $makeYouTube)
+                .font(.callout)
+
+            if let override = syncOverrideMilliseconds {
+                Text(String(format: "Koristi se ručni pomak %+.0f ms iz klizača (izmjereno: %+.0f ms).",
+                            override, manifest?.resolvedSyncOffsetMilliseconds ?? 0))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            if ScriptLocator.finalizeScriptPath() == nil {
+                Text("scripts/finalize_session.sh nije pronađen — provjeri instalaciju.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    runSessionExport()
+                } label: {
+                    Label("Pokreni finalizaciju", systemImage: "play.circle.fill")
+                }
+                .disabled(sessionArguments == nil || ScriptLocator.finalizeScriptPath() == nil
+                          || exportRunner.isRunning)
+
+                if let command = sessionCommand {
+                    CopyButton(label: "Kopiraj naredbu za Terminal", value: command)
+                }
+            }
+
+            ScriptRunnerStatusView(runner: exportRunner)
+        }
+    }
+
+    private func runSessionExport() {
+        guard let arguments = sessionArguments,
+              let script = ScriptLocator.finalizeScriptPath() else { return }
+        exportRunner.run(script: script, arguments: arguments)
+    }
+
+    /// A readable, pasteable rendition of what the runner executes.
+    private func displayCommand(script: String, arguments: [String]) -> String {
+        var parts = ["time", "\"\(script)\""]
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument.hasPrefix("--"), index + 1 < arguments.count,
+               !arguments[index + 1].hasPrefix("--") {
+                parts.append("\\\n  \(argument) \"\(arguments[index + 1])\"")
+                index += 2
+            } else {
+                parts.append("\\\n  \(argument)")
+                index += 1
+            }
         }
         return parts.joined(separator: " ")
+    }
+
+    // MARK: - Backup flow (no manifest)
+
+    private var backupFlow: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Backup snimka — bez manifesta", systemImage: "externaldrive.badge.timemachine")
+                    .font(.headline)
+                Text("Za sesije koje nisu prošle kroz aplikaciju: SD master s kamere + StereoMix.wav iz RØDE Connecta. Svi pomaci se mjere korelacijom na tri točke (scripts/finalize_backup.sh).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            lumixSection
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Zvuk i izlaz", systemImage: "waveform")
+                    .font(.headline)
+                FileField(label: "Mix (StereoMix.wav)", path: $backupAudioWav, types: [.wav])
+                HStack {
+                    Text("Izlazna mapa").frame(width: 180, alignment: .trailing).font(.callout)
+                    TextField("Odaberi izlaznu mapu…", text: $backupOutputDir)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.callout)
+                    Button("Odaberi") { chooseBackupOutputDir() }
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Izvoz", systemImage: "square.and.arrow.up")
+                    .font(.headline)
+                Toggle("Normaliziraj glasnoću na −14 LUFS (YouTube)", isOn: $backupLoudness)
+                    .font(.callout)
+                HStack {
+                    Text("Rez").frame(width: 180, alignment: .trailing).font(.callout)
+                    TextField("početak (s ili HH:MM:SS)", text: $backupStart)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.callout)
+                        .frame(width: 180)
+                    TextField("kraj (prazno = do kraja)", text: $backupEnd)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.callout)
+                        .frame(width: 180)
+                    Spacer()
+                }
+                Text("Prvo smoke test: 45 s iz sredine, s automatskom provjerom sinkrona u isječku — pa tek onda puni izvoz.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if ScriptLocator.backupScriptPath() == nil {
+                    Text("scripts/finalize_backup.sh nije pronađen — provjeri instalaciju.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        runBackup(smoke: true)
+                    } label: {
+                        Label("Smoke test (45 s)", systemImage: "testtube.2")
+                    }
+                    .disabled(backupArguments(smoke: true) == nil
+                              || ScriptLocator.backupScriptPath() == nil
+                              || exportRunner.isRunning)
+
+                    Button {
+                        runBackup(smoke: false)
+                    } label: {
+                        Label("Puni izvoz za YouTube", systemImage: "play.circle.fill")
+                    }
+                    .disabled(backupArguments(smoke: false) == nil
+                              || ScriptLocator.backupScriptPath() == nil
+                              || exportRunner.isRunning)
+
+                    if let arguments = backupArguments(smoke: false),
+                       let script = ScriptLocator.backupScriptPath() {
+                        CopyButton(label: "Kopiraj naredbu",
+                                   value: displayCommand(script: script, arguments: arguments))
+                    }
+                }
+
+                ScriptRunnerStatusView(runner: exportRunner)
+            }
+
+            Divider()
+            YouTubePrepSection(defaultInput: exportRunner.producedFile, runner: prepRunner)
+        }
+    }
+
+    private func backupArguments(smoke: Bool) -> [String]? {
+        guard !lumixVideos.isEmpty, !backupAudioWav.isEmpty, !backupOutputDir.isEmpty else { return nil }
+        var arguments: [String] = []
+        for video in lumixVideos { arguments += ["--camera", video] }
+        arguments += ["--audio", backupAudioWav, "--output-dir", backupOutputDir]
+        if backupLoudness { arguments.append("--loudness") }
+        let start = backupStart.trimmingCharacters(in: .whitespaces)
+        let end = backupEnd.trimmingCharacters(in: .whitespaces)
+        if !start.isEmpty { arguments += ["--start", start] }
+        if !end.isEmpty { arguments += ["--end", end] }
+        if smoke { arguments.append("--smoke-test") }
+        return arguments
+    }
+
+    private func runBackup(smoke: Bool) {
+        guard let arguments = backupArguments(smoke: smoke),
+              let script = ScriptLocator.backupScriptPath() else { return }
+        exportRunner.run(script: script, arguments: arguments)
+    }
+
+    private func chooseBackupOutputDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Odaberi izlaznu mapu"
+        if panel.runModal() == .OK { backupOutputDir = panel.url?.path ?? "" }
     }
 
     // MARK: - Legacy Riverside flow

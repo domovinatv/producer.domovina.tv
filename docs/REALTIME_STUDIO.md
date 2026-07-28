@@ -266,11 +266,40 @@ korelacija nije upotrebljiva — obično znači da je u sobi bilo tiho.
 
 ## Post-produkcija
 
+Sve dolje navedeno pokreće se **iz aplikacije** (Post tab) — skripte ostaju
+jedini izvor istine za ffmpeg pozive, aplikacija ih pokreće i prikazuje log.
+Post tab ima dva moda:
+
+* **Sesija iz Studija** — manifest postoji; `finalize_session.sh`, po želji s
+  `--youtube` (glasnoća −14 LUFS + AAC 384k + faststart → `*_youtube.mp4`,
+  video se ni tada ne renderira) i `--sync-offset-ms` (ručna vrijednost iz
+  klizača u pregledu, kad uho presudi drukčije od korelatora).
+* **Backup (RØDE + SD)** — sesija NIJE prošla kroz aplikaciju; samo SD master
+  i StereoMix.wav iz RØDE Connecta. `finalize_backup.sh`: korelacija na tri
+  točke, smoke test prije punog izvoza.
+
+Nakon izvoza, **Priprema za YouTube (AI)** (`prepare_youtube.sh`) napravi ono
+što mora postojati u trenutku uploada, prije nego što fetch.domovina.tv
+pipeline uopće može krenuti: transkript (Canary 1B v2 na Modalu, isti
+`modal_canary/canary_modal.py` kao u katalogu; auth je `~/.modal.toml`),
+oznake govornika (pyannote lokalno, isti `colab_diarize/diarize_canary.py`;
+HF token se sam nađe u `~/.cache/huggingface/token`), pa naslov, opis s
+poglavljima i tagove (`youtube_metadata.json` + `youtube_description.txt`,
+prikazano u aplikaciji s gumbima za kopiranje). Imena osoba smiju doći samo
+iz transkripta; ako diarizacija nije moguća, metapodaci nastaju iz običnog
+transkripta uz upozorenje.
+
+Ručno pokretanje istog:
+
 ```bash
 ./scripts/finalize_session.sh \
   --session "$HOME/Movies/DomovinaStudio/2026-07-25-1930-epizoda-42" \
   --lumix /Volumes/LUMIX/DCIM/140_PANA/P1400661.MOV \
-  --lumix /Volumes/LUMIX/DCIM/140_PANA/P1400662.MOV
+  --lumix /Volumes/LUMIX/DCIM/140_PANA/P1400662.MOV \
+  --youtube
+
+./scripts/prepare_youtube.sh --input ".../final/epizoda-42_youtube.mp4" \
+  --title-hint "radna tema epizode"
 ```
 
 Skripta:

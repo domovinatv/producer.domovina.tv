@@ -300,3 +300,32 @@ Još neprovjereno: termika kroz 3 sata pod trajnim encodeom, i `proRes422LT` na 
   automatska detekcija nije moguća; oko to prepozna trenutačno i traje jedan klik.
 * **Sve granice u uzorcima, ne u sekundama** — sekunde uvode zaokruživanje, a
   `atrim=start_sample`/`end_sample` je egzaktan.
+
+## Post iz aplikacije i AI priprema za YouTube (2026-07-28, drugi krug)
+
+Znanje iz sesije u kojoj je Post tab dobio in-app izvoz i AI pripremu:
+
+* **UI je obećavao flag koji nije postojao.** Post tab je godinama pisao „dodaj
+  skripti `--sync-offset-ms`", a `finalize_session.sh` taj argument nije
+  parsirao — ručni pomak iz klizača se nije mogao primijeniti nikako. Ista
+  klasa greške kao „izmjereno i prikazano ≠ primijenjeno": ovaj put je UI
+  pokazivao na sučelje skripte koje nitko nikad nije provjerio. Provjera je
+  jedan grep na `"$flag"` u skripti.
+* **Aplikacija iz Findera vidi PATH `/usr/bin:/bin` i ništa više.** Alati su na
+  ovom Macu u tri prefiksa: ffmpeg u `/opt/homebrew/bin`, `modal` i
+  `audio-offset-finder` u `/Library/Frameworks/Python.framework/Versions/3.13/bin`
+  (python.org; verzija se mijenja nadogradnjom — glob, ne hardcode), `claude` u
+  `~/.local/bin`. ScriptRunner ih dodaje sve tri; torch vidi samo framework
+  python (ista logika kao `PYTHON_BIN` u fetch `run_pipeline.sh`).
+* **Modal nema API ključ za kopiranje.** Autentikacija je `~/.modal.toml` od
+  `modal setup`; fetch `.env` ne sadrži ništa Modal-ovo. HF token za pyannote
+  se sam nađe u `~/.cache/huggingface/token` — `diarize_canary.py` ima vlastiti
+  resolver, ne treba mu se ništa prosljeđivati.
+* **Izmjereno na stvarnom materijalu (3 min iz epizode 2026-07-28):** Canary na
+  Modalu 5 s inferencije, pyannote lokalno 7 s (2 govornika, točno), claude
+  metapodaci ~1 min. `youtube_delivery.sh` na sintetici: izlaz točno
+  −14,0 LUFS, video stream bit-identičan (copy), moov prije mdata.
+* **Anti-halucinacijska pravila iz fetch prompta rade i ovdje:** model je na
+  testu ignorirao namjerno krivi `--title-hint` („vjera") jer sadržaj govori o
+  obiteljskim firmama, i nijedna `[SPEAKER_XX]` oznaka nije procurila u
+  naslov/opis/tagove.

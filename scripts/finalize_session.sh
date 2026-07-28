@@ -24,6 +24,8 @@ LUMIX_VIDS=()
 OUTPUT_DIR=""
 DRY_RUN=false
 KEEP_ISOLATED=true
+YOUTUBE=false
+SYNC_OVERRIDE_MS=""
 
 usage() {
     cat <<'EOF'
@@ -32,23 +34,30 @@ Upotreba:
     --session <mapa_sesije> \
     [--lumix <SD_snimka.MOV> ...] \
     [--output-dir <mapa>] \
+    [--sync-offset-ms <n>] [--youtube] \
     [--dry-run] [--help]
 
-  --session      Mapa sesije koju je snimio Studio (sadrži manifest.json).
-  --lumix        Snimka(e) sa SD kartice GH5. Bez ovoga se obrađuje samo audio.
-  --output-dir   Zadano: <mapa_sesije>/final
-  --dry-run      Izračuna i ispiše sve pomake, ali ne stvara datoteke.
+  --session         Mapa sesije koju je snimio Studio (sadrži manifest.json).
+  --lumix           Snimka(e) sa SD kartice GH5. Bez ovoga se obrađuje samo audio.
+  --output-dir      Zadano: <mapa_sesije>/final
+  --sync-offset-ms  Ručni pomak mikrofon→slika umjesto izmjerenog iz manifesta
+                    (broj iz klizača "Pomak" u Post tabu).
+  --youtube         Nakon finalne snimke napravi i *_youtube.mp4
+                    (glasnoća -14 LUFS + AAC + faststart, video se ne renderira).
+  --dry-run         Izračuna i ispiše sve pomake, ali ne stvara datoteke.
 EOF
     exit "${1:-1}"
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --session)     SESSION_DIR="${2:-}"; shift 2 ;;
-        --lumix)       LUMIX_VIDS+=("${2:-}"); shift 2 ;;
-        --output-dir)  OUTPUT_DIR="${2:-}"; shift 2 ;;
-        --dry-run)     DRY_RUN=true; shift ;;
-        --no-isolated) KEEP_ISOLATED=false; shift ;;
+        --session)        SESSION_DIR="${2:-}"; shift 2 ;;
+        --lumix)          LUMIX_VIDS+=("${2:-}"); shift 2 ;;
+        --output-dir)     OUTPUT_DIR="${2:-}"; shift 2 ;;
+        --sync-offset-ms) SYNC_OVERRIDE_MS="${2:-}"; shift 2 ;;
+        --youtube)        YOUTUBE=true; shift ;;
+        --dry-run)        DRY_RUN=true; shift ;;
+        --no-isolated)    KEEP_ISOLATED=false; shift ;;
         --help|-h)     usage 0 ;;
         *) echo "❌ Nepoznat argument: $1"; usage ;;
     esac
@@ -361,7 +370,14 @@ echo ""
 # iz kamere putuje istim lancem kao slika, pa korelacija mikrofona i HDMI zvuka
 # daje točno tu razliku. Bez ovoga zvuk pretječe sliku.
 SYNC_OFFSET_S="0"
-if [[ "$SYNC_MS" != "-" ]]; then
+if [[ -n "$SYNC_OVERRIDE_MS" ]]; then
+    # Ručna vrijednost iz klizača "Pomak" u Post tabu — čovjek je presudio uhom.
+    SYNC_OFFSET_S="$(python3 -c "print(${SYNC_OVERRIDE_MS}/1000.0)")"
+    printf "🔧 Ručni pomak mikrofon→slika: %+.1f ms  (--sync-offset-ms)\n" "$SYNC_OVERRIDE_MS"
+    if [[ "$SYNC_MS" != "-" ]]; then
+        printf "   izmjereno korelacijom bilo je %+.1f ms — koristi se ručna vrijednost\n" "$SYNC_MS"
+    fi
+elif [[ "$SYNC_MS" != "-" ]]; then
     SYNC_OFFSET_S="$(python3 -c "print(${SYNC_MS}/1000.0)")"
     printf "🎯 Pomak mikrofon→slika iz korelacije: %+.1f ms  (%s mjerenja, raspon %.1f ms)\n" \
         "$SYNC_MS" "$SYNC_COUNT" "$SYNC_SPREAD"
@@ -644,6 +660,7 @@ fi
 # --- 11. MUX SA SD SNIMKOM (bez renderiranja) ---
 if [[ ${#LUMIX_VIDS[@]} -eq 0 ]]; then
     echo "ℹ️  Bez --lumix — obrađen je samo audio."
+    [[ "$YOUTUBE" == true ]] && echo "   (--youtube preskočen: nema videa za isporuku)"
     echo "🏁 Gotovo."
     exit 0
 fi
@@ -681,6 +698,16 @@ echo ""
 echo "✅ Finalna snimka: $FINAL_OUT"
 ffprobe -v error -show_entries format=duration,size -of default=noprint_wrappers=1 "$FINAL_OUT"
 echo ""
+
+# --- 12. ISPORUKA ZA YOUTUBE (opcionalno) ---
+# Odvojen prolaz: glasnoća + AAC + faststart, video opet samo stream copy.
+if [[ "$YOUTUBE" == true ]]; then
+    DELIVERY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/youtube_delivery.sh"
+    [[ -x "$DELIVERY" ]] || { echo "❌ Nema youtube_delivery.sh pored ove skripte."; exit 1; }
+    "$DELIVERY" --input "$FINAL_OUT" --output-dir "$OUTPUT_DIR" || exit 1
+    echo ""
+fi
+
 echo "📁 Sadržaj izlazne mape:"
 ls -lh "$OUTPUT_DIR"
 echo ""
