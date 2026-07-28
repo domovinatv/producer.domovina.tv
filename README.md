@@ -33,8 +33,11 @@ ima svoj neovisni sat.
 | **Oporavak** | ako Mac otkaže, `scripts/recover_from_r2.py` rekonstruira sesiju iz segmenata |
 
 ```bash
-./scripts/build_app.sh          # .app bundle (potrebno za dopuštenja mic/kamere)
+./scripts/build_app.sh            # .app bundle (potrebno za dopuštenja mic/kamere)
 open "build/DOMOVINA Studio.app"
+
+./scripts/build_app.sh --install  # isto + kopija u /Applications
+open -a "DOMOVINA Studio"         # pa i iz Launchpada, Spotlighta i Docka
 
 ./scripts/test.sh               # testovi, ne diraju hardver
 ```
