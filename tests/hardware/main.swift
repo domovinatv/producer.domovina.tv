@@ -285,7 +285,7 @@ func roomSpeakerDeviceID() -> AudioDeviceID? {
 @MainActor
 func runHardwareTest() async -> Int32 {
     print("")
-    print("🎛  Domovina Studio — test na stvarnom hardveru")
+    print("🎛  DOMOVINA Studio — test na stvarnom hardveru")
     print("   izlaz:    \(options.outputDirectory.path)")
     print("   snimanje: \(Int(options.recordSeconds)) s (+ \(Int(options.previewSeconds)) s pretpregleda)")
 

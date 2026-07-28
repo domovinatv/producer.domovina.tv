@@ -34,7 +34,7 @@ flowchart LR
 
     EL["Elgato 4K X<br/>UVC, 3840x2160 @ 29.97"]
 
-    subgraph app["Domovina Studio"]
+    subgraph app["DOMOVINA Studio"]
         AR["AudioTrackRecorder<br/>24-bit WAV"]
         VC["VideoCaptureController<br/>HEVC 12 Mbit/s"]
         LS["LipSyncMonitor<br/>korelacija ovojnica"]

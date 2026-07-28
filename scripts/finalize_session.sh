@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# finalize_session.sh — dovršava sesiju snimljenu u Domovina Studio aplikaciji.
+# finalize_session.sh — dovršava sesiju snimljenu u DOMOVINA Studio aplikaciji.
 #
 # Razlika prema podcast_sync.sh: ovdje se pomaci NE traže korelacijom. Aplikacija
 # je svaki trag označila vremenom na zajedničkom host clocku, pa su relativni

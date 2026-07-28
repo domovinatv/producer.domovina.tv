@@ -9,7 +9,7 @@ enum Brand {
     static let blue = Color(red: 0, green: 47 / 255, blue: 108 / 255)
 }
 
-/// The Domovina Studio logo, drawn rather than loaded.
+/// The DOMOVINA Studio logo, drawn rather than loaded.
 ///
 /// This is a transcription of `domovina_studio_logo_square.svg` in the
 /// mediakit repo — the flag-filled "D", the white counter, and the studio
@@ -114,6 +114,6 @@ struct BrandMark: View {
             )
         }
         .frame(width: size, height: size)
-        .accessibilityLabel("Domovina Studio")
+        .accessibilityLabel("DOMOVINA Studio")
     }
 }

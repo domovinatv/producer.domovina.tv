@@ -1,4 +1,4 @@
-# Producer: Domovina Studio
+# Producer: DOMOVINA Studio
 
 Open-source podcast studio za macOS. Snima 2× RØDE PodMic USB kao izolirane
 tragove, Lumix GH5 preko Elgato 4K X, s egzaktnim lip syncom i kopijom na
@@ -8,7 +8,7 @@ Built and used by [Domovina.tv](https://domovina.tv).
 
 ---
 
-## 🎙️ Domovina Studio (realtime snimanje)
+## 🎙️ DOMOVINA Studio (realtime snimanje)
 
 **→ Puna dokumentacija: [`docs/REALTIME_STUDIO.md`](docs/REALTIME_STUDIO.md)**
 **→ Kako lip sync doista radi (s dijagramima): [`docs/LIP_SYNC_THEORY.md`](docs/LIP_SYNC_THEORY.md)**
@@ -34,7 +34,7 @@ ima svoj neovisni sat.
 
 ```bash
 ./scripts/build_app.sh          # .app bundle (potrebno za dopuštenja mic/kamere)
-open "build/Domovina Studio.app"
+open "build/DOMOVINA Studio.app"
 
 ./scripts/test.sh               # testovi, ne diraju hardver
 ```
@@ -149,7 +149,7 @@ The script uses named arguments. Order does not matter. You can pass as many `--
 
 All runs are logged to `sync_YYYYMMDD_HHMMSS.log` in the output directory. Temporary files are automatically cleaned up via a `trap`, even if the script fails mid-execution.
 
-## 🖥️ Aplikacija (Domovina Studio)
+## 🖥️ Aplikacija (DOMOVINA Studio)
 
 Native macOS SwiftUI aplikacija s dva taba:
 
@@ -166,7 +166,7 @@ Native macOS SwiftUI aplikacija s dva taba:
 # Preporučeno: pravi .app bundle, jer macOS dopuštenja za mikrofon i kameru
 # dodjeljuje po bundle identifieru
 ./scripts/build_app.sh
-open "build/Domovina Studio.app"
+open "build/DOMOVINA Studio.app"
 
 # Razvoj: dopuštenja se pripisuju Terminalu
 cd PodcastProducer && swift run

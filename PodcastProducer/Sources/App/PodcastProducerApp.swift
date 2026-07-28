@@ -35,7 +35,7 @@ struct PodcastProducerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        WindowGroup("Domovina Studio") {
+        WindowGroup("DOMOVINA Studio") {
             RootView()
         }
         .defaultSize(width: 1280, height: 820)

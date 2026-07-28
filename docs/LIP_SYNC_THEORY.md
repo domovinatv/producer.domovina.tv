@@ -81,7 +81,7 @@ sequenceDiagram
     participant CAM as Lumix GH5
     participant ELG as Elgato 4K X
     participant MACOS as macOS
-    participant APP as Domovina Studio
+    participant APP as DOMOVINA Studio
 
     R->>MIC: pljesak (zvuk)
     R->>CAM: pljesak (svjetlo + zvuk)
@@ -410,7 +410,7 @@ Zato je najbolji hibrid:
 flowchart LR
     RC["RØDE Connect snima<br/>svoj multitrack na disk"] --> ISO["izolirani sirovi tragovi"]
     RC --> VIRT["virtualni uređaj"]
-    VIRT --> APP["Domovina Studio<br/>hvata miks"]
+    VIRT --> APP["DOMOVINA Studio<br/>hvata miks"]
     APP --> SYNC["korelacija prema kameri<br/>→ pomak mikrofon→slika"]
     APP --> R2["backup na R2 tijekom snimanja"]
     ISO --> POST["u postu: poravnaj RØDE tragove<br/>prema uhvaćenom miksu"]

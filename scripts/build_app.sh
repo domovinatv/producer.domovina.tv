@@ -13,7 +13,7 @@ set -euo pipefail
 CONFIGURATION="${1:-release}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE_DIR="$REPO_ROOT/PodcastProducer"
-APP_NAME="Domovina Studio"
+APP_NAME="DOMOVINA Studio"
 BUILD_DIR="$REPO_ROOT/build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 

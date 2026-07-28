@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# setup_r2.sh — spoji Domovina Studio na Cloudflare R2.
+# setup_r2.sh — spoji DOMOVINA Studio na Cloudflare R2.
 #
 # Zapiše konfiguraciju u istu domenu postavki koju čita aplikacija, spremi secret
 # u Keychain, i onda pravim krugom (PUT/GET/DELETE) provjeri da sve doista radi
@@ -75,7 +75,7 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 command -v swiftc >/dev/null 2>&1 || { echo "❌ swiftc nije pronađen."; exit 1; }
 
 if pgrep -x "PodcastProducer" >/dev/null 2>&1; then
-    echo "❌ Domovina Studio je pokrenut. Zatvori ga — inače će prebrisati postavke"
+    echo "❌ DOMOVINA Studio je pokrenut. Zatvori ga — inače će prebrisati postavke"
     echo "   koje ovaj skript upiše (cfprefsd ih drži u memoriji dok app radi)."
     exit 1
 fi
@@ -107,7 +107,7 @@ if [[ "$VERIFY_ONLY" == false ]]; then
         -s "$KEYCHAIN_SERVICE" \
         -a "$ACCESS_KEY_ID" \
         -w "$SECRET_ACCESS_KEY" \
-        -l "Domovina Studio — R2" \
+        -l "DOMOVINA Studio — R2" \
         2>/dev/null
     unset SECRET_ACCESS_KEY
     echo "🔐 Secret spremljen u Keychain (servis $KEYCHAIN_SERVICE)"

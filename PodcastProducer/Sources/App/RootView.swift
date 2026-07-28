@@ -46,7 +46,7 @@ struct RootView: View {
             HStack(spacing: 10) {
                 BrandMark(size: 32)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Domovina Studio")
+                    Text("DOMOVINA Studio")
                         .font(.headline)
                     Text("Realtime podcast companion")
                         .font(.caption)

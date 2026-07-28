@@ -1,4 +1,4 @@
-# Domovina Studio — realtime podcast companion
+# DOMOVINA Studio — realtime podcast companion
 
 Open-source zamjena za Riverside.fm za snimanje u vlastitom studiju: 2× RØDE
 PodMic USB, Lumix GH5 preko Elgato 4K X, izolirani tragovi, savršen lip sync i
@@ -233,7 +233,7 @@ Svaka od ovih provjera postoji jer je nekome pokvarila snimku:
 ```bash
 # Build pravog .app bundlea (potrebno za dopuštenja mikrofona/kamere)
 ./scripts/build_app.sh
-open "build/Domovina Studio.app"
+open "build/DOMOVINA Studio.app"
 
 # Razvoj bez bundlea (dopuštenja se pripisuju Terminalu)
 cd PodcastProducer && swift run
