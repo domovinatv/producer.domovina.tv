@@ -13,6 +13,7 @@ Built and used by [Domovina.tv](https://domovina.tv).
 **→ Puna dokumentacija: [`docs/REALTIME_STUDIO.md`](docs/REALTIME_STUDIO.md)**
 **→ Kako lip sync doista radi (s dijagramima): [`docs/LIP_SYNC_THEORY.md`](docs/LIP_SYNC_THEORY.md)**
 **→ Izmjereni brojevi, pronađeni bugovi, otvorene pretpostavke: [`docs/LESSONS.md`](docs/LESSONS.md)**
+**→ Karta studija: tok signala, lanac ispravaka, načini pucanja: [`docs/STUDIO_MAP.md`](docs/STUDIO_MAP.md)**
 
 Ključna razlika prema svemu ostalom: sync se ne traži korelacijom nakon snimanja.
 CoreAudio i AVFoundation označavaju uzorke istim satom (`mach_absolute_time`), pa
