@@ -1,6 +1,6 @@
 import SwiftUI
 import AppKit
-import AVKit
+import AVFoundation
 import UniformTypeIdentifiers
 
 /// Post-production hand-off.
@@ -27,6 +27,9 @@ struct PostProcessView: View {
     @State private var player: AVPlayer?
     @State private var nudgeMilliseconds: Double = 0
     @State private var isPlaying = false
+    @State private var currentTime: Double = 0
+    @State private var duration: Double = 0
+    @State private var timeObserver: Any?
 
     // Legacy Riverside flow
     @AppStorage("scriptPath") private var scriptPath = ""
@@ -166,7 +169,7 @@ struct PostProcessView: View {
 
             if let preview {
                 if preview.hasVideo {
-                    VideoPlayer(player: player)
+                    SyncPlayerView(player: player)
                         .frame(height: 320)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 } else {
@@ -174,11 +177,29 @@ struct PostProcessView: View {
                         Image(systemName: "waveform")
                         Text("Sesija nema sliku — reproducira se samo zvuk.")
                         Spacer()
-                        Button(isPlaying ? "Pauza" : "Sviraj") { togglePlayback() }
                     }
                     .padding(10)
                     .background(Color(nsColor: .controlBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                // AVPlayerLayer draws the picture but brings no controls, so the
+                // transport is ours.
+                HStack(spacing: 12) {
+                    Button {
+                        togglePlayback()
+                    } label: {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill").frame(width: 20)
+                    }
+                    Slider(value: Binding(
+                        get: { currentTime },
+                        set: { seek(to: $0) }
+                    ), in: 0...max(duration, 0.1))
+                    Text(String(format: "%d:%02d / %d:%02d",
+                                Int(currentTime) / 60, Int(currentTime) % 60,
+                                Int(duration) / 60, Int(duration) % 60))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
 
                 HStack(spacing: 12) {
@@ -222,6 +243,23 @@ struct PostProcessView: View {
         isPlaying.toggle()
     }
 
+    private func seek(to seconds: Double) {
+        currentTime = seconds
+        player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
+                     toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Drives the scrubber. Removed with the old player, or it would keep firing
+    /// against a composition that no longer exists after a rebuild.
+    private func observeTime(of newPlayer: AVPlayer) {
+        if let timeObserver, let old = player { old.removeTimeObserver(timeObserver) }
+        timeObserver = newPlayer.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main
+        ) { time in
+            currentTime = CMTimeGetSeconds(time)
+        }
+    }
+
     private func rebuildPreview(_ manifest: SessionManifest) async {
         guard let folder = manifestFolder else { return }
         player?.pause()
@@ -235,6 +273,9 @@ struct PostProcessView: View {
             )
             let item = AVPlayerItem(asset: built.composition)
             let newPlayer = AVPlayer(playerItem: item)
+            observeTime(of: newPlayer)
+            duration = CMTimeGetSeconds(try await built.composition.load(.duration))
+            currentTime = 0
             player = newPlayer
             preview = built
             nudgeMilliseconds = built.appliedOffsetMilliseconds

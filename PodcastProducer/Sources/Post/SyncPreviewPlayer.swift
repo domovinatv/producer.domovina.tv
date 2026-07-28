@@ -1,5 +1,48 @@
 import Foundation
+import SwiftUI
 import AVFoundation
+
+/// Plays the composition through an `AVPlayerLayer`.
+///
+/// Deliberately not SwiftUI's `VideoPlayer`. That lives in AVKit, reached through
+/// the `_AVKit_SwiftUI` cross-import overlay, and in this SwiftPM-built binary
+/// the overlay loads but cannot resolve its superclass metadata — the app died
+/// on `getSuperclassMetadata` the moment the view was built, before a frame was
+/// ever drawn. `AVPlayerLayer` is plain AVFoundation, which is already linked,
+/// so nothing has to be inferred at runtime.
+struct SyncPlayerView: NSViewRepresentable {
+    let player: AVPlayer?
+
+    func makeNSView(context: Context) -> PlayerNSView {
+        let view = PlayerNSView()
+        view.playerLayer.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: PlayerNSView, context: Context) {
+        if nsView.playerLayer.player !== player { nsView.playerLayer.player = player }
+    }
+
+    final class PlayerNSView: NSView {
+        let playerLayer = AVPlayerLayer()
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer = CALayer()
+            layer?.backgroundColor = NSColor.black.cgColor
+            playerLayer.videoGravity = .resizeAspect
+            layer?.addSublayer(playerLayer)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) nije podržan") }
+
+        override func layout() {
+            super.layout()
+            playerLayer.frame = bounds
+        }
+    }
+}
 
 /// Builds a playable composition of the take with lip sync already applied, so
 /// it can be judged before anything is rendered.
