@@ -209,7 +209,37 @@ final class VideoCaptureController: NSObject {
 
     // MARK: - Session lifecycle
 
-    func startSession(videoDeviceID: String, audioDeviceID: String?) throws {
+    /// Attaches a preview layer to the session.
+    ///
+    /// Must go through `sessionQueue` like everything else that touches the
+    /// session. Assigning `previewLayer.session` mutates the session's internal
+    /// collections, and doing that from the main thread while `startRunning()`
+    /// was enumerating them on this queue crashed the app outright
+    /// (`__NSFastEnumerationMutationHandler`). SwiftUI creates the view whenever
+    /// it likes, so the ordering cannot be arranged — it has to be serialised.
+    func attachPreview(to layer: AVCaptureVideoPreviewLayer) {
+        sessionQueue.async { [session] in
+            if layer.session !== session { layer.session = session }
+        }
+    }
+
+    /// Async because the whole thing now runs on `sessionQueue`. Doing it
+    /// synchronously would mean blocking the main thread for as long as a 4K
+    /// UVC device takes to come up, which is roughly a second of frozen UI.
+    func startSession(videoDeviceID: String, audioDeviceID: String?) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sessionQueue.async {
+                do {
+                    try self.configureAndStart(videoDeviceID: videoDeviceID, audioDeviceID: audioDeviceID)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func configureAndStart(videoDeviceID: String, audioDeviceID: String?) throws {
         guard let videoDevice = AVCaptureDevice(uniqueID: videoDeviceID) else {
             throw CaptureError.noVideoDevice
         }
@@ -259,11 +289,15 @@ final class VideoCaptureController: NSObject {
         status.sessionLastFrameHostNanos = nil
         stateLock.unlock()
 
-        sessionQueue.async { [session] in
-            if !session.isRunning { session.startRunning() }
-        }
+        // Already on `sessionQueue`, and `commitConfiguration()` runs via the
+        // `defer` above — before this, because the defer fires when the enclosing
+        // scope exits. Starting the session from a *different* queue while that
+        // configuration was still open is what made this racy in the first place.
+        session.commitConfiguration()
+        if !session.isRunning { session.startRunning() }
+
         stateLock.lock()
-        status.isSessionRunning = true
+        status.isSessionRunning = session.isRunning
         stateLock.unlock()
     }
 

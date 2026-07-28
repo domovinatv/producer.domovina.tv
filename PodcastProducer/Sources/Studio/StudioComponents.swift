@@ -129,20 +129,23 @@ struct MicChannelStrip: View {
 
 // MARK: - Video preview
 
+/// Takes the controller rather than the session, because attaching the layer is
+/// a session mutation and has to be serialised with everything else that touches
+/// it. Assigning `previewLayer.session` straight from the main thread — which is
+/// where SwiftUI builds views — crashed the app whenever it happened to land
+/// while the capture queue was inside `startRunning()`.
 struct CapturePreviewView: NSViewRepresentable {
-    let session: AVCaptureSession
+    let controller: VideoCaptureController
 
     func makeNSView(context: Context) -> PreviewNSView {
         let view = PreviewNSView()
-        view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspect
+        controller.attachPreview(to: view.previewLayer)
         return view
     }
 
     func updateNSView(_ nsView: PreviewNSView, context: Context) {
-        if nsView.previewLayer.session !== session {
-            nsView.previewLayer.session = session
-        }
+        controller.attachPreview(to: nsView.previewLayer)
     }
 
     final class PreviewNSView: NSView {

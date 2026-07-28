@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AVFoundation
 import Combine
+import AppKit
 
 /// Orchestrates a live take: microphones, camera, manifest, health and uploads.
 ///
@@ -118,27 +119,51 @@ final class StudioViewModel: ObservableObject {
     ///   twice. `RØDE Connect System` in particular is system audio capture, not
     ///   microphones — assigning it would silently record whatever the Mac plays.
     private func autoAssignMicrophones() {
-        let physical = availableInputs.filter {
-            $0.name.localizedCaseInsensitiveContains("podmic")
-                && !$0.name.localizedCaseInsensitiveContains("connect")
-        }
-
         let candidates: [AudioInputDevice]
-        if !physical.isEmpty {
-            candidates = physical
+
+        if isRodeConnectRunning, let mix = rodeConnectMixDevice {
+            // Its processing is the reason to be on this path at all: two PodMics
+            // a hand apart on a desk bleed into each other, and the per-channel
+            // gating removes that at the source, live. Nothing in post recovers
+            // it as cleanly.
+            candidates = [mix]
         } else {
-            // Virtual RØDE devices: never the system-audio one, and only one slot.
-            let virtualMix = availableInputs.filter {
-                ($0.name.localizedCaseInsensitiveContains("rode") || $0.name.localizedCaseInsensitiveContains("røde"))
-                    && !$0.name.localizedCaseInsensitiveContains("system")
+            let physical = availableInputs.filter {
+                $0.name.localizedCaseInsensitiveContains("podmic")
+                    && !$0.name.localizedCaseInsensitiveContains("connect")
             }
-            candidates = Array(virtualMix.prefix(1))
+            if !physical.isEmpty {
+                candidates = physical
+            } else {
+                // Virtual RØDE devices: never the system-audio one, and only one slot.
+                let virtualMix = availableInputs.filter {
+                    ($0.name.localizedCaseInsensitiveContains("rode") || $0.name.localizedCaseInsensitiveContains("røde"))
+                        && !$0.name.localizedCaseInsensitiveContains("system")
+                }
+                candidates = Array(virtualMix.prefix(1))
+            }
         }
 
         for (index, slot) in micSlots.enumerated() {
             guard slot.deviceUID == nil || availableInputs.first(where: { $0.uid == slot.deviceUID }) == nil else { continue }
             micSlots[index].deviceUID = index < candidates.count ? candidates[index].uid : nil
         }
+    }
+
+    /// The RØDE Connect driver installs its virtual devices permanently, so their
+    /// presence says nothing — only the app being up means the mix is live.
+    var isRodeConnectRunning: Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.rode.rodeconnect" }
+    }
+
+    /// Measured against a real RØDE Connect session: of the three virtual
+    /// devices, only **Stream** carries the processed microphone mix. `Virtual`
+    /// sits at digital silence and `System` is system-audio capture, which would
+    /// record whatever the Mac happens to be playing.
+    ///
+    /// This does not depend on Monitor Out, which only decides where *you* listen.
+    var rodeConnectMixDevice: AudioInputDevice? {
+        availableInputs.first { $0.name.localizedCaseInsensitiveContains("connect stream") }
     }
 
     /// True when the assigned inputs are RØDE Connect virtual devices rather than
@@ -181,7 +206,7 @@ final class StudioViewModel: ObservableObject {
                 videoController.onMonitorSamples = { [weak self] samples, count, rate, hostNanos in
                     self?.lipSyncMonitor.feedCamera(samples: samples, count: count, sampleRate: rate, hostNanos: hostNanos)
                 }
-                try videoController.startSession(videoDeviceID: videoDeviceID, audioDeviceID: selectedCameraAudioDeviceID)
+                try await videoController.startSession(videoDeviceID: videoDeviceID, audioDeviceID: selectedCameraAudioDeviceID)
             }
 
             isPreviewing = true

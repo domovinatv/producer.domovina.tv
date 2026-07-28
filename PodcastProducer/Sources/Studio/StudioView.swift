@@ -193,7 +193,7 @@ struct StudioView: View {
             ZStack {
                 Color.black
                 if model.isPreviewing {
-                    CapturePreviewView(session: model.videoController.session)
+                    CapturePreviewView(controller: model.videoController)
                 } else {
                     VStack(spacing: 8) {
                         Image(systemName: "video.slash")
