@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVKit
 import UniformTypeIdentifiers
 
 /// Post-production hand-off.
@@ -19,6 +20,13 @@ struct PostProcessView: View {
     @State private var lumixVideos: [String] = []
     @State private var copied = false
     @State private var loadError: String?
+
+    // Lip sync preview
+    @State private var preview: SyncPreviewPlayer.Result?
+    @State private var previewError: String?
+    @State private var player: AVPlayer?
+    @State private var nudgeMilliseconds: Double = 0
+    @State private var isPlaying = false
 
     // Legacy Riverside flow
     @AppStorage("scriptPath") private var scriptPath = ""
@@ -88,6 +96,8 @@ struct PostProcessView: View {
             if let manifest {
                 manifestSummary(manifest)
                 Divider()
+                syncPreviewSection(manifest)
+                Divider()
                 lumixSection
                 Divider()
                 commandSection(command: sessionCommand)
@@ -135,6 +145,103 @@ struct PostProcessView: View {
                 }
                 .font(.callout)
             }
+        }
+    }
+
+    // MARK: - Lip sync preview
+
+    /// Plays the take with sync already applied, before anything is rendered.
+    ///
+    /// The point is the order of operations: finalize is a long job on a large
+    /// file, and running it only to discover the sync is wrong wastes all of it.
+    /// Here the picture and the isolated microphones are placed on one timeline
+    /// and played live, so the answer arrives in seconds. The nudge slider is
+    /// deliberately included — if what the correlator measured looks off, the
+    /// right value can be found by ear and handed straight to finalize.
+    @ViewBuilder
+    private func syncPreviewSection(_ manifest: SessionManifest) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Provjera lip synca", systemImage: "play.rectangle")
+                .font(.headline)
+
+            if let preview {
+                if preview.hasVideo {
+                    VideoPlayer(player: player)
+                        .frame(height: 320)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    HStack {
+                        Image(systemName: "waveform")
+                        Text("Sesija nema sliku — reproducira se samo zvuk.")
+                        Spacer()
+                        Button(isPlaying ? "Pauza" : "Sviraj") { togglePlayback() }
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                HStack(spacing: 12) {
+                    Text("Pomak")
+                    Slider(value: $nudgeMilliseconds, in: -400...400, step: 1)
+                    Text(String(format: "%+.0f ms", nudgeMilliseconds))
+                        .font(.callout.monospaced().weight(.medium))
+                        .frame(width: 78, alignment: .trailing)
+                    Button("Primijeni") { Task { await rebuildPreview(manifest) } }
+                        .disabled(abs(nudgeMilliseconds - preview.appliedOffsetMilliseconds) < 0.5)
+                }
+
+                if abs(nudgeMilliseconds - (manifest.resolvedSyncOffsetMilliseconds ?? 0)) > 0.5 {
+                    Text(String(format: "Izmjereno je %+.0f ms. Ako ovo zvuči bolje, dodaj skripti --sync-offset-ms %.0f",
+                                manifest.resolvedSyncOffsetMilliseconds ?? 0, nudgeMilliseconds))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+
+                ForEach(preview.notes, id: \.self) { note in
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+            } else if let previewError {
+                Text(previewError).font(.callout).foregroundStyle(.red)
+            } else {
+                HStack {
+                    Text("Sastavi sliku i izolirane mikrofone na jednu vremensku os i poslušaj prije renderiranja.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Pripremi") { Task { await rebuildPreview(manifest) } }
+                }
+            }
+        }
+    }
+
+    private func togglePlayback() {
+        guard let player else { return }
+        if isPlaying { player.pause() } else { player.play() }
+        isPlaying.toggle()
+    }
+
+    private func rebuildPreview(_ manifest: SessionManifest) async {
+        guard let folder = manifestFolder else { return }
+        player?.pause()
+        isPlaying = false
+        previewError = nil
+        do {
+            let built = try await SyncPreviewPlayer.build(
+                manifest: manifest,
+                sessionURL: folder,
+                offsetOverrideMilliseconds: preview == nil ? nil : nudgeMilliseconds
+            )
+            let item = AVPlayerItem(asset: built.composition)
+            let newPlayer = AVPlayer(playerItem: item)
+            player = newPlayer
+            preview = built
+            nudgeMilliseconds = built.appliedOffsetMilliseconds
+        } catch {
+            previewError = error.localizedDescription
+            preview = nil
+            player = nil
         }
     }
 

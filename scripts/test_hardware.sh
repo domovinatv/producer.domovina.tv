@@ -7,7 +7,8 @@
 # izvana (ffprobe nad datotekama, neovisno o AVFoundationu koji ih je napisao).
 #
 # Test sam proizvede zvuk kroz zvučnike Maca, jer se sinkronizacija ne može
-# izmjeriti u tihoj sobi. Glasnoća se privremeno podigne i vrati na kraju.
+# izmjeriti u tihoj sobi. Zvučnike otvara izravno i sam im podigne pa vrati
+# glasnoću — sistemske postavke zvuka ostaju netaknute.
 #
 # NE pokretati tijekom snimanja — uređaji su ekskluzivni.
 #
@@ -36,13 +37,12 @@ BUILD_DIR="$(mktemp -d)"
 command -v swiftc >/dev/null 2>&1 || { echo "❌ swiftc nije pronađen."; exit 1; }
 command -v ffprobe >/dev/null 2>&1 || { echo "❌ ffprobe nije pronađen (brew install ffmpeg)"; exit 1; }
 
-# Glasnoća se vraća i ako test padne ili ga netko prekine.
-ORIGINAL_VOLUME="$(osascript -e 'output volume of (get volume settings)' 2>/dev/null || echo "")"
-restore() {
-    [[ -n "$ORIGINAL_VOLUME" ]] && osascript -e "set volume output volume $ORIGINAL_VOLUME" 2>/dev/null || true
-    rm -rf "$BUILD_DIR"
-}
-trap restore EXIT
+# Glasnoća se više ne dira ovdje: `set volume` gađa *zadani* izlaz, a test svira
+# izravno na zvučnike Maca. Čim su slušalice ukopčane to su dva različita
+# uređaja, pa se dizala glasnoća na jednom dok je drugi ostajao tih — a test bi
+# onda prijavio mrtve mikrofone na ispravnom hardveru. Sada program sam podigne i
+# vrati glasnoću uređaja kroz koji doista svira.
+trap 'rm -rf "$BUILD_DIR"' EXIT
 
 echo "🔨 Gradim testni program…"
 swiftc -O -target arm64-apple-macosx14.0 -o "$BUILD_DIR/hardware" \
@@ -62,11 +62,6 @@ swiftc -O -target arm64-apple-macosx14.0 -o "$BUILD_DIR/hardware" \
     "$SOURCES/Upload/UploadQueue.swift" \
     "$SOURCES/Studio/StudioViewModel.swift" \
     "$REPO_ROOT/tests/hardware/main.swift"
-
-if [[ -n "$ORIGINAL_VOLUME" ]]; then
-    echo "🔊 Podižem glasnoću na 80 (bila $ORIGINAL_VOLUME) za testni signal…"
-    osascript -e 'set volume output volume 80' 2>/dev/null || true
-fi
 
 set +e
 # Bash 3.2 (macOS) tretira praznu ekspanziju polja kao nepostavljenu varijablu

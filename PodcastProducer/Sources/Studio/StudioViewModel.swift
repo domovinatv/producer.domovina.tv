@@ -262,6 +262,19 @@ final class StudioViewModel: ObservableObject {
             return
         }
 
+        // Video must not hinge on whether the preview toggle happened to be on.
+        // A 104-minute take came out audio-only because it wasn't, and the only
+        // sign was one warning line inside the session log — read for the first
+        // time after the guests had gone home. If a camera is selected, bring
+        // the capture session up ourselves.
+        if selectedVideoDeviceID != nil, !isPreviewing {
+            await startPreview()
+            // The session needs a moment before it delivers frames; without this
+            // the writer would start on the first audio buffer instead and the
+            // take would open with a stretch of black.
+            try? await Task.sleep(nanoseconds: 700_000_000)
+        }
+
         // Pre-flight: refuse rather than fail 40 minutes in.
         let preflight = healthMonitor.evaluate(
             sessionDirectory: libraryURL,
@@ -301,11 +314,14 @@ final class StudioViewModel: ObservableObject {
             newStore.log("Snimanje pokrenuto", level: .info)
 
             try startMicrophones(store: newStore, queue: queue)
-            startVideo(store: newStore, queue: queue)
+            let videoStarted = startVideo(store: newStore, queue: queue)
 
             isRecording = true
             elapsedSeconds = 0
-            lastError = nil
+            // Only clear the error line if there is nothing left to say. Wiping
+            // it unconditionally is what let a 104-minute take look perfectly
+            // healthy on screen while it recorded no picture at all.
+            if videoStarted { lastError = nil }
         } catch {
             lastError = error.localizedDescription
             await teardownRecorders()
@@ -384,10 +400,28 @@ final class StudioViewModel: ObservableObject {
         }
     }
 
-    private func startVideo(store: SessionStore, queue: UploadQueue) {
-        guard isPreviewing, selectedVideoDeviceID != nil else {
-            store.log("Video nije aktivan — snima se samo audio", level: .warning)
-            return
+    /// Returns whether the camera is actually recording, so the caller can leave
+    /// the warning on screen if it is not.
+    private func startVideo(store: SessionStore, queue: UploadQueue) -> Bool {
+        // Losing the camera for a whole take is not a warning-level event, so it
+        // is surfaced where the operator is looking rather than only in the log.
+        //
+        // This has already cost a 104-minute take: macOS asks for camera access
+        // on first use, the prompt went unanswered, and recording then went ahead
+        // with audio alone. The only trace was one line inside the session log,
+        // read for the first time long after the guests had left.
+        //
+        // Keyed on `isSessionRunning` rather than `isPreviewing`, because the
+        // session is what produces frames — and it stays false when TCC refuses.
+        guard selectedVideoDeviceID != nil else {
+            lastError = "⚠️ SNIMA SE SAMO ZVUK — nije odabrana kamera."
+            store.log("Video nije aktivan: nije odabrana kamera — snima se samo audio", level: .error)
+            return false
+        }
+        guard videoController.snapshot().isSessionRunning else {
+            lastError = "⚠️ SNIMA SE SAMO ZVUK — kamera nije dostupna. Provjeri dopuštenje u Postavkama → Privatnost i sigurnost → Kamera."
+            store.log("Video nije aktivan: capture sesija nije pokrenuta (dopuštenje?) — snima se samo audio", level: .error)
+            return false
         }
 
         let masterURL = store.videoURL.appendingPathComponent("camera-proxy.mov")
@@ -450,9 +484,11 @@ final class StudioViewModel: ObservableObject {
                 ))
             }
             store.log("Video snimanje pokrenuto (\(status.width)×\(status.height) @ \(Int(status.nominalFrameRate))fps, \(masterCodec.displayName))")
+            return true
         } catch {
-            lastError = error.localizedDescription
+            lastError = "⚠️ SNIMA SE SAMO ZVUK — \(error.localizedDescription)"
             store.log("Video snimanje NIJE pokrenuto: \(error.localizedDescription)", level: .error)
+            return false
         }
     }
 
@@ -691,7 +727,10 @@ final class StudioViewModel: ObservableObject {
             sessionDirectory: sessionFolderURL ?? libraryURL,
             estimatedGigabytesPerHour: estimatedGigabytesPerHour,
             microphones: microphones,
-            video: isPreviewing ? videoStatus : nil,
+            // Keyed on a camera being selected, not on preview: the dead-camera
+            // check is worth the most during a take, which is exactly when
+            // preview may have been switched off.
+            video: selectedVideoDeviceID != nil ? videoStatus : nil,
             upload: uploadStats,
             isRecording: isRecording,
             elapsedSeconds: elapsedSeconds

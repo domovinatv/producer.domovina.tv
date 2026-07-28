@@ -95,8 +95,51 @@ final class TonePlayer {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private(set) var isRunning = false
+    private var deviceID: AudioDeviceID?
+    private var restoreVolume: Float?
+
+    /// Volume has to be set on the device we actually play through, not on the
+    /// system default — those are different the moment headphones are plugged
+    /// in, and raising the wrong one leaves the room silent.
+    private static func volumeAddress(channel: UInt32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: channel
+        )
+    }
+
+    private static func volume(of device: AudioDeviceID) -> Float? {
+        // Element 0 is the master control; plenty of devices only expose the
+        // individual channels, so fall back to the left one.
+        for channel in [UInt32(0), UInt32(1)] {
+            var address = volumeAddress(channel: channel)
+            guard AudioObjectHasProperty(device, &address) else { continue }
+            var value: Float = 0
+            var size = UInt32(MemoryLayout<Float>.size)
+            if AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr { return value }
+        }
+        return nil
+    }
+
+    private static func setVolume(_ value: Float, on device: AudioDeviceID) {
+        for channel in [UInt32(0), UInt32(1), UInt32(2)] {
+            var address = volumeAddress(channel: channel)
+            guard AudioObjectHasProperty(device, &address) else { continue }
+            var settable: DarwinBoolean = false
+            guard AudioObjectIsPropertySettable(device, &address, &settable) == noErr, settable.boolValue else { continue }
+            var copy = value
+            AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<Float>.size), &copy)
+        }
+    }
 
     func start(deviceID: AudioDeviceID?) throws {
+        self.deviceID = deviceID
+        if let deviceID {
+            restoreVolume = TonePlayer.volume(of: deviceID)
+            TonePlayer.setVolume(0.75, on: deviceID)
+        }
+
         if let deviceID, let audioUnit = engine.outputNode.audioUnit {
             var identifier = deviceID
             AudioUnitSetProperty(
@@ -130,6 +173,10 @@ final class TonePlayer {
         player.stop()
         engine.stop()
         isRunning = false
+        // Leave the machine exactly as it was found.
+        if let deviceID, let restoreVolume {
+            TonePlayer.setVolume(restoreVolume, on: deviceID)
+        }
     }
 
     /// Udari šuma od 45 ms na nepravilnim razmacima (0.30–0.95 s).
@@ -186,6 +233,51 @@ func defaultOutputDeviceID() -> AudioDeviceID? {
     var size = UInt32(MemoryLayout<AudioDeviceID>.size)
     let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID)
     return status == noErr && deviceID != 0 ? deviceID : nil
+}
+
+/// The device the test signal must come out of: the one that fills the room.
+///
+/// Not the system default. Plugging in headphones silently makes them the
+/// default, and the whole measurement then depends on something unrelated to the
+/// studio — the burst goes into somebody's ears, the microphones hear nothing,
+/// and the test reports dead microphones on perfectly healthy hardware.
+///
+/// Opening the speakers directly through the AUHAL also means the test never
+/// touches the system's output setting, so it cannot leave the machine
+/// reconfigured behind it.
+func roomSpeakerDeviceID() -> AudioDeviceID? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else {
+        return defaultOutputDeviceID()
+    }
+    var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr else {
+        return defaultOutputDeviceID()
+    }
+
+    func uid(_ device: AudioDeviceID) -> String {
+        var property = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: CFString = "" as CFString
+        var valueSize = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &value) {
+            AudioObjectGetPropertyData(device, &property, 0, nil, &valueSize, $0)
+        }
+        return status == noErr ? value as String : ""
+    }
+
+    if let speakers = ids.first(where: { uid($0) == "BuiltInSpeakerDevice" }) {
+        return speakers
+    }
+    return defaultOutputDeviceID()
 }
 
 // MARK: - Tijek testa
@@ -265,8 +357,8 @@ func runHardwareTest() async -> Int32 {
     let tone = TonePlayer()
     if options.playsTone {
         do {
-            try tone.start(deviceID: defaultOutputDeviceID())
-            record("Testni signal", true, "udari šuma kroz zadani izlaz — čuju ih i mikrofoni i kamera")
+            try tone.start(deviceID: roomSpeakerDeviceID())
+            record("Testni signal", true, "udari šuma kroz zvučnike Maca — čuju ih i mikrofoni i kamera")
         } catch {
             record("Testni signal", false, error.localizedDescription, advisory: true)
         }
