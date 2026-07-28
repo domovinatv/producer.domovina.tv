@@ -165,6 +165,52 @@ expect(reloaded.events.first?.message == "test događaj", "događaj preživio za
 expect(store.relativePath(for: store.audioURL.appendingPathComponent("mic-1.wav")) == "audio/mic-1.wav", "relativna putanja")
 try? FileManager.default.removeItem(at: tmp)
 
+
+// ---------- Cloudflare dashboard URL parsing ----------
+//
+// The account ID is 32 hex characters nobody retypes correctly, so it is read
+// from the address bar of the page the operator is already on.
+
+func parsed(_ url: String) -> R2DashboardURL.Parsed? { R2DashboardURL.parse(url) }
+
+let bucketURL = "https://dash.cloudflare.com/7dc7167b7e2e00923bfa7cd697df14e4/r2/default/buckets/domovina-tv-podcast-studio-storage/settings"
+expect(parsed(bucketURL)?.accountID == "7dc7167b7e2e00923bfa7cd697df14e4", "account iz URL-a bucketa")
+expect(parsed(bucketURL)?.bucket == "domovina-tv-podcast-studio-storage", "bucket iz URL-a")
+
+// Bucket lives after the "buckets" marker, not at a fixed depth: the
+// jurisdiction segment is "default" on most accounts but "eu" elsewhere.
+expect(parsed("https://dash.cloudflare.com/7dc7167b7e2e00923bfa7cd697df14e4/r2/eu/buckets/moj-bucket")?.bucket == "moj-bucket",
+       "jurisdikcija eu ne pomiče bucket")
+
+// Pages that are not about one bucket still carry the account.
+let overview = parsed("https://dash.cloudflare.com/7dc7167b7e2e00923bfa7cd697df14e4/r2/overview")
+expect(overview?.accountID == "7dc7167b7e2e00923bfa7cd697df14e4" && overview?.bucket == nil,
+       "overview daje account bez bucketa")
+
+expect(parsed("dash.cloudflare.com/7dc7167b7e2e00923bfa7cd697df14e4/r2/overview") != nil,
+       "radi i bez sheme, kako neki preglednici kopiraju")
+expect(parsed("  " + bucketURL + "\n") != nil, "praznine oko zalijepljenog teksta se ignoriraju")
+
+// Anything that is not a Cloudflare account URL must be refused rather than
+// half-accepted — a wrong account ID fails much later, at upload time.
+expect(parsed("https://example.com/7dc7167b7e2e00923bfa7cd697df14e4/r2/overview") == nil, "tuđi host odbijen")
+expect(parsed("https://dash.cloudflare.com/nije-account/r2/overview") == nil, "neispravan account odbijen")
+expect(parsed("https://dash.cloudflare.com/7DC7167B7E2E00923BFA7CD697DF14E4/r2/overview") == nil, "velika slova nisu account ID")
+expect(parsed("") == nil, "prazan unos odbijen")
+
+expect(R2DashboardURL.apiTokensPage(accountID: "7dc7167b7e2e00923bfa7cd697df14e4")?.absoluteString
+       == "https://dash.cloudflare.com/7dc7167b7e2e00923bfa7cd697df14e4/r2/api-tokens",
+       "link na stranicu s ključevima")
+
+// The S3 secret is the SHA-256 of the token value — a pure function, so it is
+// checkable against a known vector without touching the network.
+expect(R2TokenCredentials.secretAccessKey(forToken: "abc") ==
+       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+       "secret je SHA-256 tokena")
+expect(R2TokenCredentials.secretAccessKey(forToken: "  abc\n") ==
+       R2TokenCredentials.secretAccessKey(forToken: "abc"),
+       "praznine oko tokena ne mijenjaju secret")
+
 // ---------- Device enumeration ----------
 let inputs = AudioDeviceEnumerator.inputDevices()
 print("\nℹ️  CoreAudio ulazni uređaji (\(inputs.count)):")

@@ -20,6 +20,7 @@ swiftc -O -o "$BUILD_DIR/core" \
     "$SOURCES/Core/LevelMeter.swift" \
     "$SOURCES/Capture/LipSyncMonitor.swift" \
     "$SOURCES/Capture/AudioDeviceEnumerator.swift" \
+    "$SOURCES/Upload/R2Credentials.swift" \
     "$SOURCES/Session/SessionManifest.swift" \
     "$SOURCES/Session/SessionStore.swift" \
     "$REPO_ROOT/tests/core/main.swift"

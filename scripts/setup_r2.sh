@@ -28,6 +28,31 @@ VERIFY_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --url)
+            # Ista logika kao u aplikaciji: account je prvi segment putanje,
+            # a bucket dolazi iza oznake "buckets" — jurisdikcija između njih
+            # ("default", "eu", …) ne smije pomaknuti poziciju.
+            PARSED="$(python3 - "$2" <<'PYURL'
+import sys, re
+from urllib.parse import urlparse, unquote
+raw = sys.argv[1].strip()
+if "://" not in raw: raw = "https://" + raw
+u = urlparse(raw)
+if u.hostname not in ("dash.cloudflare.com",) : sys.exit(1)
+parts = [p for p in u.path.split("/") if p]
+if not parts or not re.fullmatch(r"[0-9a-f]{32}", parts[0]): sys.exit(1)
+bucket = ""
+if "buckets" in parts:
+    i = parts.index("buckets")
+    if i + 1 < len(parts): bucket = unquote(parts[i+1])
+print(parts[0], bucket)
+PYURL
+)" || { echo "❌ Ovo ne izgleda kao adresa Cloudflare računa: $2"; exit 2; }
+            ACCOUNT_ID="$(echo "$PARSED" | cut -d' ' -f1)"
+            URL_BUCKET="$(echo "$PARSED" | cut -d' ' -f2)"
+            [[ -n "$URL_BUCKET" ]] && BUCKET="$URL_BUCKET"
+            echo "🔗 Iz URL-a: account $ACCOUNT_ID${URL_BUCKET:+, bucket $URL_BUCKET}"
+            shift 2 ;;
         --account) ACCOUNT_ID="$2"; shift 2 ;;
         --bucket) BUCKET="$2"; shift 2 ;;
         --prefix) PREFIX="$2"; shift 2 ;;
@@ -36,7 +61,7 @@ while [[ $# -gt 0 ]]; do
         --verify-only) VERIFY_ONLY=true; shift ;;
         -h|--help)
             sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
-            echo "Zastavice: --account --bucket --prefix --library --upload-masters --verify-only"
+            echo "Zastavice: --url --account --bucket --prefix --library --upload-masters --verify-only"
             exit 0 ;;
         *) echo "❌ Nepoznat argument: $1"; exit 2 ;;
     esac

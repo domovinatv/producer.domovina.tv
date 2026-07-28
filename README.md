@@ -46,9 +46,23 @@ Bucket se radi jednom, wranglerom:
 CLOUDFLARE_ACCOUNT_ID=<account> wrangler r2 bucket create domovina-studio-sessions --location eeur
 ```
 
-Pristupne ključeve wrangler **ne može** napraviti — R2 S3 kredencijali se rade u
-dashboardu (R2 → API → Manage API Tokens → Object Read & Write, ograničeno na taj
-bucket). S njima:
+Pristupne ključeve wrangler **ne može** napraviti — rade se u dashboardu:
+`https://dash.cloudflare.com/<account>/r2/api-tokens` → Create API Token, Object
+Read & Write, ograničeno na taj bucket.
+
+U aplikaciji (Postavke → Cloudflare R2) ne treba ništa prepisivati:
+
+* **zalijepi adresu bucketa iz dashboarda** — account i bucket se očitaju iz nje;
+* **ili zalijepi Cloudflare API token** — Access Key ID je ID tokena, a Secret
+  njegov SHA-256, pa jedan token doista je dovoljan.
+
+Isto radi i iz ljuske:
+
+```bash
+./scripts/setup_r2.sh --url "https://dash.cloudflare.com/<account>/r2/default/buckets/<bucket>/settings"
+```
+
+S ključevima:
 
 ```bash
 ./scripts/setup_r2.sh          # konfiguracija + Keychain + provjera pravim krugom

@@ -3,6 +3,13 @@ import AVFoundation
 
 /// Device routing, codec choice and Cloudflare R2 credentials.
 struct StudioSettingsView: View {
+
+    // Paste helpers for the R2 tab
+    @State private var dashboardURL = ""
+    @State private var urlNote: String?
+    @State private var apiToken = ""
+    @State private var tokenNote: String?
+    @State private var isDerivingKeys = false
     @ObservedObject var model: StudioViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = 0
@@ -300,6 +307,106 @@ struct StudioSettingsView: View {
 
     // MARK: - R2
 
+    /// Fills the fields below from things that can be pasted whole.
+    ///
+    /// Every value on this screen is a long opaque string, and two of them —
+    /// the account ID and the access key — are already sitting somewhere the
+    /// operator can copy from. Retyping them by hand is the single most likely
+    /// way for this configuration to end up subtly wrong, and it fails late:
+    /// not here, but at the first upload of a live take.
+    @ViewBuilder
+    private var r2PasteHelpers: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Zalijepi adresu bucketa iz Cloudflare dashboarda")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 8) {
+                    TextField("https://dash.cloudflare.com/…/r2/default/buckets/…", text: $dashboardURL)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    Button("Očitaj") { applyDashboardURL() }
+                        .disabled(R2DashboardURL.parse(dashboardURL) == nil)
+                }
+                if let note = urlNote {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(note.hasPrefix("✅") ? .green : .orange)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Ili zalijepi Cloudflare API token (s pravom Object Read & Write)")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 8) {
+                    SecureField("token", text: $apiToken)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    Button(isDerivingKeys ? "Izvodim…" : "Izvedi ključeve") {
+                        Task { await deriveKeys() }
+                    }
+                    .disabled(apiToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isDerivingKeys)
+                }
+                // Not a shortcut around SigV4 — the two values genuinely are
+                // derived from the token, so pasting it is exactly equivalent to
+                // copying both fields, minus the transcription errors.
+                Text("Access Key ID je ID tokena, a Secret je njegov SHA-256 — pa jedan token doista je dovoljan.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let note = tokenNote {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(note.hasPrefix("✅") ? .green : .orange)
+                }
+            }
+
+            if let page = R2DashboardURL.apiTokensPage(accountID: model.r2Configuration.accountID) {
+                Link("Otvori stranicu za izradu ključeva ↗", destination: page)
+                    .font(.caption)
+            } else {
+                Text("Ključevi se rade na dash.cloudflare.com → R2 → API → Manage API Tokens. Upiši Account ID gore pa se ovdje pojavi izravan link.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func applyDashboardURL() {
+        guard let parsed = R2DashboardURL.parse(dashboardURL) else {
+            urlNote = "Ovo ne izgleda kao adresa Cloudflare računa."
+            return
+        }
+        model.r2Configuration.accountID = parsed.accountID
+        if let bucket = parsed.bucket {
+            model.r2Configuration.bucket = bucket
+            urlNote = "✅ Account i bucket „\(bucket)\" očitani."
+        } else {
+            urlNote = "✅ Account očitan. Bucket upiši ručno — ova stranica se ne odnosi ni na jedan."
+        }
+        model.saveR2Configuration()
+    }
+
+    private func deriveKeys() async {
+        isDerivingKeys = true
+        defer { isDerivingKeys = false }
+        let token = apiToken
+        do {
+            let id = try await R2TokenCredentials.accessKeyID(forToken: token)
+            model.r2Configuration.accessKeyID = id
+            model.r2SecretInput = R2TokenCredentials.secretAccessKey(forToken: token)
+            model.saveR2Configuration()
+            // The token itself is never stored — only what was derived from it.
+            apiToken = ""
+            tokenNote = "✅ Ključevi izvedeni i spremljeni. Provjeri vezu ispod."
+        } catch {
+            tokenNote = error.localizedDescription
+        }
+    }
+
     private var r2Tab: some View {
         VStack(alignment: .leading, spacing: 16) {
             Toggle("Spremaj na Cloudflare R2", isOn: $model.r2Configuration.isEnabled)
@@ -308,6 +415,8 @@ struct StudioSettingsView: View {
             Text("Upload nikad ne blokira snimanje. Ako veza padne, snimka se nastavlja normalno, a red za slanje se prazni kad se veza vrati.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            r2PasteHelpers
 
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                 GridRow {
