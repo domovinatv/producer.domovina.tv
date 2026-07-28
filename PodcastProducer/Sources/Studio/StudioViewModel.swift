@@ -166,6 +166,27 @@ final class StudioViewModel: ObservableObject {
         availableInputs.first { $0.name.localizedCaseInsensitiveContains("connect stream") }
     }
 
+    /// The setup this studio records with: one track, carrying RØDE Connect's
+    /// processed mix.
+    static let rodeConnectSlotLabel = "Podcast"
+
+    /// True when the microphone configuration is already exactly that.
+    var isRodeConnectSetupApplied: Bool {
+        guard let mix = rodeConnectMixDevice else { return false }
+        return micSlots.count == 1 && micSlots[0].deviceUID == mix.uid
+    }
+
+    /// Collapses the configuration to that one slot.
+    ///
+    /// A second slot is not a smaller mistake than a wrong one: the mix already
+    /// contains both speakers, so anything else recorded alongside it is the same
+    /// audio a second time, out of phase with itself.
+    func applyRodeConnectSetup() {
+        guard !isRecording, let mix = rodeConnectMixDevice else { return }
+        micSlots = [MicSlot(id: "mic-1", label: Self.rodeConnectSlotLabel, deviceUID: mix.uid)]
+        persistSelections()
+    }
+
     /// RØDE Connect is mixing, yet a slot is pointed at a physical microphone
     /// behind it — the raw, ungated signal the mixer was turned on to avoid.
     var isBypassingRodeConnect: Bool {

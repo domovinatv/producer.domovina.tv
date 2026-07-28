@@ -53,6 +53,67 @@ struct StudioSettingsView: View {
 
     // MARK: - Devices
 
+    /// The one setup this studio records with, stated plainly and applied in a
+    /// click.
+    ///
+    /// It sits above the explanation rather than inside it: getting this single
+    /// choice right is the whole of the audio configuration, and everything else
+    /// on this screen is detail by comparison.
+    @ViewBuilder
+    private var rodeConnectRecipe: some View {
+        let hasMix = model.rodeConnectMixDevice != nil
+        let applied = model.isRodeConnectSetupApplied
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: applied ? "checkmark.seal.fill" : "star.fill")
+                    .foregroundStyle(applied ? Color.green : Color.accentColor)
+                Text("Preporučena postava")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+                if !applied {
+                    Button("Postavi") { model.applyRodeConnectSetup() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(!hasMix || model.isRecording)
+                }
+            }
+
+            Text("Jedan mikrofon, naziv **\(StudioViewModel.rodeConnectSlotLabel)**, uređaj **RØDE Connect Stream**. To je jedino što treba postaviti.")
+                .font(.caption)
+
+            if applied {
+                Text("Postavljeno. Snima se obrađeni miks iz RØDE Connecta.")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else if !hasMix {
+                Text("„RØDE Connect Stream\" nije pronađen — provjeri je li RØDE Connect instaliran.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            if !model.isRodeConnectRunning {
+                Text("⚠️ RØDE Connect nije pokrenut. Uređaj postoji i bez njega, ali miks je tada tišina — pokreni ga prije snimanja.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            // Monitor Out comes up every time, because it looks like it should be
+            // the thing that feeds other apps. It is not — it only decides where
+            // the operator listens, and the mix reaches us regardless.
+            Text("U RØDE Connectu ne treba dirati Monitor Out — on je samo za tvoje slušalice.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(applied ? Color.green.opacity(0.4) : Color.accentColor.opacity(0.4))
+        )
+    }
+
     private var devicesTab: some View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 10) {
@@ -62,22 +123,23 @@ struct StudioSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Dvije moguće postave:")
-                        .font(.caption.weight(.semibold))
-                    Text("**Direktno** — po jedan PodMic USB u svaki slot. Sirovi izolirani tragovi; svaki mikrofon ima svoj clock pa se drift mjeri i zapisuje u manifest. Namjerno bez Aggregate Devicea.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("**RØDE Connect** — jedan slot na virtualni uređaj. Prelijevanje glasova, gate i miks radi RØDE, sync se svodi na jednu korelaciju prema kameri. Ali dobiješ već obrađen miks, ne sirove tragove — za izolirane snimaj i u RØDE Connectu.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("⚠️ „RØDE Connect System\" je zvuk sustava, ne mikrofoni. Uključi Pregled i govori — mjerač pokazuje koji je ulaz pravi.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                rodeConnectRecipe
+
+                DisclosureGroup("Zašto baš tako, i što je alternativa") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("**RØDE Connect (preporučeno ovdje)** — jedan slot na virtualni uređaj. Mikrofoni su na stolu preblizu jedan drugome, pa se glasovi prelijevaju; gate i miks to rješavaju uživo, na izvoru, bolje nego bilo što u postu. Dobiješ već obrađen miks umjesto sirovih tragova — za izolirane snimaj usporedno u samom RØDE Connectu.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("**Direktno** — po jedan PodMic USB u svaki slot. Sirovi izolirani tragovi; svaki mikrofon ima svoj clock pa se drift mjeri i zapisuje u manifest. Namjerno bez Aggregate Devicea. Ima smisla samo ako su mikrofoni dovoljno razmaknuti.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("⚠️ Od tri virtualna uređaja samo **Stream** nosi miks. „RØDE Connect Virtual\" je tišina, a „RØDE Connect System\" je zvuk sustava — snimio bi što god Mac svira.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    .padding(.top, 6)
                 }
-                .padding(10)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .font(.caption)
 
                 ForEach($model.micSlots) { $slot in
                     HStack(spacing: 8) {
