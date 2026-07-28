@@ -41,9 +41,25 @@ final class HealthMonitor {
                   video: VideoCaptureController.Status?,
                   upload: UploadQueue.Stats,
                   isRecording: Bool,
-                  elapsedSeconds: Double) -> HealthReport {
+                  elapsedSeconds: Double,
+                  isBypassingRodeConnect: Bool = false) -> HealthReport {
 
         var items: [HealthReport.Item] = []
+
+        // RØDE Connect is running, but the take is pointed at the raw microphones
+        // behind it. That records without any of the gating the mixer exists for —
+        // and with two PodMics a hand apart, the bleed it removes is the whole
+        // reason it was switched on. Said rather than silently corrected: changing
+        // which device a take records from is not a decision to make on someone's
+        // behalf, least of all mid-session.
+        if isBypassingRodeConnect {
+            items.append(.init(
+                id: "rode-topology",
+                title: "RØDE Connect",
+                detail: "radi, ali snimaju se sirovi mikrofoni — bez gatinga, s prelijevanjem. Prebaci slot na 'RØDE Connect Stream'.",
+                severity: .warning
+            ))
+        }
 
         // Disk
         let target = sessionDirectory ?? SessionStore.defaultLibraryURL

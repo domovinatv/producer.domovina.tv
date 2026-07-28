@@ -166,6 +166,16 @@ final class StudioViewModel: ObservableObject {
         availableInputs.first { $0.name.localizedCaseInsensitiveContains("connect stream") }
     }
 
+    /// RØDE Connect is mixing, yet a slot is pointed at a physical microphone
+    /// behind it — the raw, ungated signal the mixer was turned on to avoid.
+    var isBypassingRodeConnect: Bool {
+        guard isRodeConnectRunning, rodeConnectMixDevice != nil else { return false }
+        return assignedMicrophones.contains { entry in
+            entry.device.name.localizedCaseInsensitiveContains("podmic")
+                && !entry.device.name.localizedCaseInsensitiveContains("connect")
+        }
+    }
+
     /// True when the assigned inputs are RØDE Connect virtual devices rather than
     /// the microphones themselves. Worth surfacing, because it changes what you
     /// get: one already-processed mix instead of isolated raw tracks.
@@ -758,7 +768,8 @@ final class StudioViewModel: ObservableObject {
             video: selectedVideoDeviceID != nil ? videoStatus : nil,
             upload: uploadStats,
             isRecording: isRecording,
-            elapsedSeconds: elapsedSeconds
+            elapsedSeconds: elapsedSeconds,
+            isBypassingRodeConnect: isBypassingRodeConnect
         )
 
         if let store {
