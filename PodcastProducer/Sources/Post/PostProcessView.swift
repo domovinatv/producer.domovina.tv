@@ -24,6 +24,10 @@ import UniformTypeIdentifiers
 /// See `Mode.selectable` for how to put it back.
 struct PostProcessView: View {
     var sessionFolder: URL?
+    /// The session library from Studio settings. Post opens on its contents,
+    /// newest first, so a take is picked from a list instead of hunted for in
+    /// a file panel.
+    var libraryURL: URL
 
     @State private var mode: Mode = .session
     @State private var manifest: SessionManifest?
@@ -31,6 +35,11 @@ struct PostProcessView: View {
     @State private var lumixVideos: [String] = []
     @State private var copied = false
     @State private var loadError: String?
+
+    // Session library listing
+    @State private var sessions: [SessionLibrary.Entry] = []
+    @State private var libraryProblem: String?
+    @State private var isScanningLibrary = false
 
     // In-app script execution
     @StateObject private var exportRunner = ScriptRunner()
@@ -108,13 +117,21 @@ struct PostProcessView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .onAppear(perform: initialLoad)
+        .onAppear {
+            initialLoad()
+            Task { await reloadLibrary() }
+        }
+        .onChange(of: libraryURL) {
+            Task { await reloadLibrary() }
+        }
     }
 
     // MARK: - Session flow
 
     private var sessionFlow: some View {
         VStack(alignment: .leading, spacing: 22) {
+            libraryList
+
             VStack(alignment: .leading, spacing: 10) {
                 Label("Mapa sesije", systemImage: "folder")
                     .font(.headline)
@@ -148,6 +165,131 @@ struct PostProcessView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    // MARK: - Session library
+
+    /// Everything in the configured library, newest first.
+    ///
+    /// The file panel stays available below for takes that live somewhere else,
+    /// but choosing the episode recorded an hour ago should not require
+    /// navigating to it.
+    private var libraryList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Snimke", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+                if isScanningLibrary {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+                Text("\(sessions.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Button {
+                    Task { await reloadLibrary() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Osvježi popis snimki")
+            }
+
+            Text(libraryURL.path)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.head)
+
+            if let libraryProblem {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "externaldrive.badge.questionmark")
+                        .foregroundStyle(.orange)
+                    Text(libraryProblem)
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+            } else if sessions.isEmpty {
+                Text(isScanningLibrary ? "Čitam mapu sesija…" : "U mapi sesija nema nijedne snimke.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(sessions) { entry in
+                            sessionRow(entry)
+                        }
+                    }
+                }
+                // Tall enough to show a handful without pushing the rest of
+                // post-production off the screen.
+                .frame(maxHeight: 260)
+            }
+        }
+    }
+
+    private func sessionRow(_ entry: SessionLibrary.Entry) -> some View {
+        let isCurrent = manifestFolder?.standardizedFileURL == entry.url.standardizedFileURL
+        return Button {
+            load(folder: entry.url)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: entry.isReadable
+                      ? (entry.hasVideo ? "video.fill" : "waveform")
+                      : "exclamationmark.triangle.fill")
+                    .foregroundStyle(entry.isReadable ? (isCurrent ? Color.accentColor : Color.secondary) : Color.orange)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.title)
+                        .fontWeight(isCurrent ? .semibold : .regular)
+                        .lineLimit(1)
+                    Text(entry.url.lastPathComponent)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+
+                Spacer(minLength: 12)
+
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text(entry.recordedAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption.monospacedDigit())
+                    Text(entry.isReadable ? rowDetail(entry) : "manifest se ne može pročitati")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .background(isCurrent ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func rowDetail(_ entry: SessionLibrary.Entry) -> String {
+        let tracks = "\(entry.trackCount) \(entry.trackCount == 1 ? "trag" : "tragova")"
+        guard let duration = entry.durationSeconds else { return "\(tracks) · bez trajanja" }
+        return "\(Self.formatDuration(duration)) · \(tracks)"
+    }
+
+    private func reloadLibrary() async {
+        let library = libraryURL
+        isScanningLibrary = true
+        // Off the main thread: the library normally sits on an external drive,
+        // and a spun-down disk would otherwise freeze the window.
+        let scan = await Task.detached(priority: .userInitiated) {
+            SessionLibrary.scan(library)
+        }.value
+        // A slow scan of a folder the user has since changed away from must not
+        // overwrite the newer one.
+        guard library == libraryURL else { return }
+        sessions = scan.entries
+        libraryProblem = scan.problem
+        isScanningLibrary = false
     }
 
     private func manifestSummary(_ manifest: SessionManifest) -> some View {
@@ -824,6 +966,22 @@ struct PostProcessView: View {
     }
 
     private func load(folder: URL) {
+        // All of this belongs to the session that was open a moment ago.
+        //
+        // Leaving it in place is what made switching takes look broken: the
+        // player kept showing the previous session, because the view only
+        // offers "Pripremi" while `preview` is nil and otherwise renders
+        // whatever player it already has. The nudge was worse than cosmetic —
+        // a non-nil `preview` is exactly what tells `rebuildPreview` to treat
+        // the slider as an offset override, so the old take's correction would
+        // have been applied to the new one.
+        resetPreview()
+        lumixVideos = []
+        copied = false
+        // Shown even when the load fails: the path that produced the error is
+        // more use than "nije odabrana".
+        manifestFolder = folder
+
         let url = folder.appendingPathComponent("manifest.json")
         guard let data = try? Data(contentsOf: url) else {
             loadError = "U mapi nema manifest.json"
@@ -834,12 +992,29 @@ struct PostProcessView: View {
         decoder.dateDecodingStrategy = .iso8601
         do {
             manifest = try decoder.decode(SessionManifest.self, from: data)
-            manifestFolder = folder
             loadError = nil
         } catch {
             loadError = "Manifest se ne može pročitati: \(error.localizedDescription)"
             manifest = nil
         }
+    }
+
+    /// Drops every piece of lip-sync preview state, tearing down the player
+    /// properly on the way out — the periodic time observer holds the player
+    /// alive and keeps firing against a composition nobody is watching.
+    private func resetPreview() {
+        player?.pause()
+        if let timeObserver, let player {
+            player.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        player = nil
+        preview = nil
+        previewError = nil
+        isPlaying = false
+        currentTime = 0
+        duration = 0
+        nudgeMilliseconds = 0
     }
 
     private func autoDetectScript() {

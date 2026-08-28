@@ -35,7 +35,8 @@ struct RootView: View {
             case .studio:
                 StudioView(model: studioModel)
             case .post:
-                PostProcessView(sessionFolder: studioModel.sessionFolderURL)
+                PostProcessView(sessionFolder: studioModel.sessionFolderURL,
+                                libraryURL: studioModel.libraryURL)
             }
         }
         .frame(minWidth: 1000, minHeight: 680)
