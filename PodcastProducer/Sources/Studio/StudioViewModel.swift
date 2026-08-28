@@ -27,6 +27,12 @@ final class StudioViewModel: ObservableObject {
     ]
     @Published var selectedVideoDeviceID: String?
     @Published var selectedCameraAudioDeviceID: String?
+    /// Names of the two selections above, persisted beside their IDs. See
+    /// `resolveVideoSelection()` — on macOS a USB capture device's `uniqueID`
+    /// is not stable across ports or reboots, and the name is what lets a saved
+    /// selection survive one.
+    private var selectedVideoDeviceName: String?
+    private var selectedCameraAudioDeviceName: String?
     @Published var masterCodec: VideoCaptureController.MasterCodec = .hevc
     @Published var libraryURL: URL = SessionStore.defaultLibraryURL
     @Published var r2Configuration = R2ConfigurationStore.load()
@@ -73,6 +79,7 @@ final class StudioViewModel: ObservableObject {
     private var fastTimer: Timer?
     private var slowTimer: Timer?
     private var deviceListener: AudioObjectPropertyListenerBlock?
+    private var captureDeviceObservers: [NSObjectProtocol] = []
 
     // MARK: - Lifecycle
 
@@ -84,11 +91,25 @@ final class StudioViewModel: ObservableObject {
         deviceListener = AudioDeviceEnumerator.addDeviceListListener(queue: .main) { [weak self] in
             Task { @MainActor in self?.handleDeviceListChanged() }
         }
+
+        // The CoreAudio listener above only covers audio. Plugging the Elgato in
+        // after launch used to leave the video list exactly as it was found —
+        // empty — until someone thought to press "Osvježi uređaje".
+        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+            captureDeviceObservers.append(
+                NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.refreshDevices() }
+                }
+            )
+        }
     }
 
     deinit {
         fastTimer?.invalidate()
         slowTimer?.invalidate()
+        for observer in captureDeviceObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     func refreshDevices() {
@@ -96,15 +117,74 @@ final class StudioViewModel: ObservableObject {
         availableVideoDevices = VideoCaptureController.videoDevices()
         availableCameraAudioDevices = VideoCaptureController.audioDevices()
 
-        if selectedVideoDeviceID == nil {
-            // The Elgato is the only external video device in a normal studio.
-            selectedVideoDeviceID = availableVideoDevices.first { $0.localizedName.localizedCaseInsensitiveContains("elgato") }?.uniqueID
-                ?? availableVideoDevices.first?.uniqueID
-        }
-        if selectedCameraAudioDeviceID == nil {
-            selectedCameraAudioDeviceID = availableCameraAudioDevices.first { $0.localizedName.localizedCaseInsensitiveContains("elgato") }?.uniqueID
-        }
+        resolveVideoSelection()
+        resolveCameraAudioSelection()
         autoAssignMicrophones()
+    }
+
+    /// Re-points a saved video selection at the device it names when its ID has
+    /// stopped resolving.
+    ///
+    /// A USB capture device has no stable `uniqueID` on macOS. The Elgato 4K X
+    /// reports its USB *location* — `0x2100000fd9009c` — and that number moves
+    /// with the port, with a hub in front of it, and sometimes across a plain
+    /// reboot. A selection persisted as that number alone then matches nothing:
+    /// `AVCaptureDevice(uniqueID:)` returns nil, capture fails with "no video
+    /// device", and the picker shows an empty row — while Camera Hub and every
+    /// other app on the machine still show the HDMI feed, because they never
+    /// stored the number in the first place. The device *name* survives all of
+    /// that, so it is kept alongside the ID and used to find the device again.
+    ///
+    /// The recovered ID is written straight back to defaults, so the stale one
+    /// cannot come back on the next launch.
+    private func resolveVideoSelection() {
+        if let id = selectedVideoDeviceID,
+           let device = availableVideoDevices.first(where: { $0.uniqueID == id }) {
+            selectedVideoDeviceName = device.localizedName
+            return
+        }
+
+        let recovered = deviceNamed(selectedVideoDeviceName, in: availableVideoDevices)
+            ?? Self.preferredCaptureDevice(in: availableVideoDevices)
+
+        guard let recovered else { return }
+        selectedVideoDeviceID = recovered.uniqueID
+        selectedVideoDeviceName = recovered.localizedName
+        persistSelections()
+    }
+
+    private func resolveCameraAudioSelection() {
+        if let id = selectedCameraAudioDeviceID,
+           let device = availableCameraAudioDevices.first(where: { $0.uniqueID == id }) {
+            selectedCameraAudioDeviceName = device.localizedName
+            return
+        }
+
+        let recovered = deviceNamed(selectedCameraAudioDeviceName, in: availableCameraAudioDevices)
+            ?? availableCameraAudioDevices.first { $0.localizedName.localizedCaseInsensitiveContains("elgato") }
+
+        guard let recovered else { return }
+        selectedCameraAudioDeviceID = recovered.uniqueID
+        selectedCameraAudioDeviceName = recovered.localizedName
+        persistSelections()
+    }
+
+    private func deviceNamed(_ name: String?, in devices: [AVCaptureDevice]) -> AVCaptureDevice? {
+        guard let name, !name.isEmpty else { return nil }
+        return devices.first { $0.localizedName == name }
+    }
+
+    /// The Elgato is the only *capture* device in a normal studio, but far from
+    /// the only entry in the list: OBS, Camo, mmhmm, EOS Webcam Utility and
+    /// Elgato's own Camera Hub all install virtual cameras, and one of them is
+    /// literally called "Elgato Virtual Camera". Matching on the name alone can
+    /// land on a software camera that shows a black frame, so hardware is
+    /// preferred and anything self-identifying as virtual goes last.
+    private static func preferredCaptureDevice(in devices: [AVCaptureDevice]) -> AVCaptureDevice? {
+        let hardware = devices.filter { !$0.localizedName.localizedCaseInsensitiveContains("virtual") }
+        return hardware.first { $0.localizedName.localizedCaseInsensitiveContains("elgato") }
+            ?? hardware.first
+            ?? devices.first
     }
 
     /// Pre-fills the mic slots so a fresh machine is close to ready.
@@ -238,6 +318,10 @@ final class StudioViewModel: ObservableObject {
                     self?.lipSyncMonitor.feedCamera(samples: samples, count: count, sampleRate: rate, hostNanos: hostNanos)
                 }
                 try await videoController.startSession(videoDeviceID: videoDeviceID, audioDeviceID: selectedCameraAudioDeviceID)
+            } else {
+                // Audio still comes up; say why the picture did not, instead of
+                // showing a black preview and no explanation.
+                monitorErrors.append("Nije odabran video ulaz — otvori postavke i odaberi kameru.")
             }
 
             isPreviewing = true
@@ -879,8 +963,16 @@ final class StudioViewModel: ObservableObject {
 
     private func persistSelections() {
         let defaults = UserDefaults.standard
+        // Names are taken from the live list first: the picker writes only an ID,
+        // so a selection the user just made has no name attached yet.
+        selectedVideoDeviceName = availableVideoDevices.first { $0.uniqueID == selectedVideoDeviceID }?.localizedName
+            ?? selectedVideoDeviceName
+        selectedCameraAudioDeviceName = availableCameraAudioDevices.first { $0.uniqueID == selectedCameraAudioDeviceID }?.localizedName
+            ?? selectedCameraAudioDeviceName
         defaults.set(selectedVideoDeviceID, forKey: "studio.videoDevice")
         defaults.set(selectedCameraAudioDeviceID, forKey: "studio.cameraAudioDevice")
+        defaults.set(selectedVideoDeviceName, forKey: "studio.videoDeviceName")
+        defaults.set(selectedCameraAudioDeviceName, forKey: "studio.cameraAudioDeviceName")
         defaults.set(masterCodec.rawValue, forKey: "studio.masterCodec")
         defaults.set(libraryURL.path, forKey: "studio.library")
         let encoded = micSlots.map { ["id": $0.id, "label": $0.label, "uid": $0.deviceUID ?? ""] }
@@ -891,6 +983,8 @@ final class StudioViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         selectedVideoDeviceID = defaults.string(forKey: "studio.videoDevice")
         selectedCameraAudioDeviceID = defaults.string(forKey: "studio.cameraAudioDevice")
+        selectedVideoDeviceName = defaults.string(forKey: "studio.videoDeviceName")
+        selectedCameraAudioDeviceName = defaults.string(forKey: "studio.cameraAudioDeviceName")
         if let raw = defaults.string(forKey: "studio.masterCodec"),
            let codec = VideoCaptureController.MasterCodec(rawValue: raw) {
             masterCodec = codec

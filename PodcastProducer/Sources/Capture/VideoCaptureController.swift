@@ -23,7 +23,7 @@ final class VideoCaptureController: NSObject {
 
         var errorDescription: String? {
             switch self {
-            case .noVideoDevice: return "Nije pronađen video uređaj (Elgato). Provjeri USB kabel."
+            case .noVideoDevice: return "Odabrani video uređaj više nije dostupan. Provjeri USB kabel, pa u postavkama osvježi popis i odaberi ulaz ponovno."
             case .cannotAddInput(let name): return "Ne mogu dodati ulaz u capture sesiju: \(name)"
             case .writerSetupFailed(let reason): return "Priprema snimanja videa nije uspjela: \(reason)"
             case .permissionDenied(let kind): return "macOS je odbio pristup \(kind). Postavke → Privatnost i sigurnost."
