@@ -329,3 +329,82 @@ Znanje iz sesije u kojoj je Post tab dobio in-app izvoz i AI pripremu:
   testu ignorirao namjerno krivi `--title-hint` („vjera") jer sadržaj govori o
   obiteljskim firmama, i nijedna `[SPEAKER_XX]` oznaka nije procurila u
   naslov/opis/tagove.
+
+## Identitet uređaja i stanje koje preživi promjenu sesije (2026-08-27)
+
+Sesija je krenula od prijave „app kaže da USB Elgato ne postoji, a u Elgato
+Studiju normalno vidim HDMI sliku i zvuk".
+
+### Uređaj se ne smije pamtiti po `uniqueID`
+
+| Stvar | Vrijednost | Kako znam |
+|---|---|---|
+| `AVCaptureDevice.uniqueID` za USB capture | **nije stabilan** | Elgato 4K X se javio kao `0x2100000fd9009c`, a u postavkama je stajalo `0x32100000fd9009c`. To je USB *lokacija* — mijenja se s portom, hubom i rebootom. |
+| CoreAudio UID istog uređaja | **stabilan** | `AppleUSBAudioEngine:Elgato:Elgato 4K X:A7SNB40810L0OK:3` nosi serijski broj. HDMI-zvuk izbor je preživio isti događaj netaknut, dok je video pukao. |
+| Kamera vidljiva bez dozvole | **da, cijela lista** | S `authorizationStatus == .notDetermined` (svjež bundle id, pokrenut preko `open`) discovery je vratio svih 11 uređaja. |
+| Elgato dok Elgato Studio radi | **61 frame u 3 s, 1920×1080** | `isInUseByAnotherApplication = false`. Nema ekskluzivnog zauzeća, dvije aplikacije mogu držati isti UVC ulaz. |
+
+Iz ovoga slijede dva pravila:
+
+1. **Prazan popis uređaja nikad nije problem s dozvolom.** Ako je popis prazan,
+   kriv je ID ili filtriran tip uređaja. Dozvola se vidi tek kad se sesija
+   pokuša pokrenuti.
+2. **Pamti ime uz ID.** Ime preživi promjenu porta; broj ne. Isto vrijedi za
+   `AudioObjectID` iz gornje tablice — tamo je rješenje isto, samo je UID već
+   stabilan pa se ne mora spašavati.
+
+Redoslijed kojim se izbor vraća:
+
+```mermaid
+flowchart TD
+    A["spremljeni uniqueID"] -->|nađen u listi| OK["koristi ga<br/>osvježi zapamćeno ime"]
+    A -->|nema ga| B["spremljeno ime uređaja"]
+    B -->|točno podudaranje| RE["koristi ga<br/>odmah upiši novi ID u postavke"]
+    B -->|nema ga| C["hardver prije virtualnih kamera"]
+    C --> D["ime sadrži 'elgato'"]
+    D --> E["prvi hardverski"]
+```
+
+Filtriranje „virtual" nije kozmetika: na ovom Macu su u listi i *Elgato Virtual
+Camera*, OBS, Camo, mmhmm, EOS Webcam Utility i OBSBOT — traženje po imenu
+„elgato" može sletjeti na softversku kameru koja daje crnu sliku.
+
+### `nil` kao skriveni prekidač načina rada
+
+Post tab je nakon prvog klika na **Pripremi** zadržavao player prve sesije;
+promjena mape ga nije mijenjala. Uzrok nije bio player nego to što je
+`load(folder:)` mijenjao manifest, a stanje pregleda ostavljao netaknuto:
+
+* view nudi **Pripremi** samo dok je `preview == nil`, pa se s ne-nil vrijednošću
+  gumb više nikad ne pojavi;
+* `rebuildPreview` iz `preview != nil` zaključuje da klizač treba tretirati kao
+  override — dakle pomak stare snimke bi se primijenio na novu.
+
+Klasa greške: **jedna `nil` provjera nosi dva različita značenja** („nije još
+građeno" i „korisnik je ručno pomaknuo"), pa promjena dokumenta mora resetirati
+oboje. Kad view ima „dokument" koji se mijenja, svako izvedeno stanje mora imati
+jedno mjesto na kojem se ruši — ovdje `resetPreview()`, koji uz to skida
+periodični time observer (inače drži player živ i puca po kompoziciji koju više
+nitko ne gleda).
+
+### Zašto se popis snimki sortira po `createdAt`
+
+Post sada izlistava sesije iz mape iz Postavki, najnovije prvo. Ključ sortiranja
+je `createdAt` iz manifesta, a ne:
+
+* **ime foldera** — `yyyy-MM-dd-HHmm` ide samo do minute; dvije snimke u istoj
+  minuti (16:20 i 16:21 iz probe) poredale bi se nasumično;
+* **datum datoteke** — kopiranje biblioteke na drugi disk prepiše sve datume, a
+  finalizacija jedan.
+
+Nemountan disk je stanje koje se prikazuje (`Mapa sesija nije dostupna: …`), ne
+greška koja se proguta u prazan popis. Folder s pokvarenim `manifest.json` se i
+dalje izlista i označi — to je upravo snimka do koje netko treba doći.
+
+### Otvoreno
+
+* Popis prikazuje samo mapu iz Postavki. Stariji materijal iz
+  `/Volumes/DOMOVINA1TB/podcast_producer_output` (20 snimki iz srpnja) se ne vidi
+  dok je biblioteka `podcast_domovina_studio_storage`. Više mapa nije traženo.
+* Kalibracija pljeskom i dalje stoji na `-5,5 ms` od 2026-07-28; nije ponovno
+  mjerena nakon zamjene porta.
