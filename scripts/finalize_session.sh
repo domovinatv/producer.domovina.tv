@@ -15,6 +15,8 @@
 #   4. Napravi miks svih mikrofona
 #   5. Ako je dan --lumix: poravna SD master prema proxyju i muxa ga s miksom
 #      koristeći stream copy (bez renderiranja videa)
+#   6. Ako sesija ima dodatne kamere (telefone) u <sesija>/cameras ili su dane s
+#      --cameras: poravna svaku na miks preko zvuka (sync_cameras.py) — 0..N kamera
 #
 set -uo pipefail
 
@@ -26,6 +28,8 @@ DRY_RUN=false
 KEEP_ISOLATED=true
 YOUTUBE=false
 SYNC_OVERRIDE_MS=""
+CAMERA_SOURCES=()
+CAMERA_RENDER=true
 
 usage() {
     cat <<'EOF'
@@ -35,6 +39,7 @@ Upotreba:
     [--lumix <SD_snimka.MOV> ...] \
     [--output-dir <mapa>] \
     [--sync-offset-ms <n>] [--youtube] \
+    [--cameras <mapa_ili_video> ...] [--cameras-sync-only] \
     [--dry-run] [--help]
 
   --session         Mapa sesije koju je snimio Studio (sadrži manifest.json).
@@ -44,6 +49,11 @@ Upotreba:
                     (broj iz klizača "Pomak" u Post tabu).
   --youtube         Nakon finalne snimke napravi i *_youtube.mp4
                     (glasnoća -14 LUFS + AAC + faststart, video se ne renderira).
+  --cameras         Dodatne kamere (telefoni): mapa ili video datoteka, može više
+                    puta. Zadano: <mapa_sesije>/cameras ako postoji (tamo ih
+                    stavlja `node multicam/director.mjs pull <sessionId> <sesija>/cameras`).
+  --cameras-sync-only  Samo izmjeri pomak i drift kamera (multicam_sync.json),
+                    bez renderiranja poravnatih videa.
   --dry-run         Izračuna i ispiše sve pomake, ali ne stvara datoteke.
 EOF
     exit "${1:-1}"
@@ -56,6 +66,8 @@ while [[ $# -gt 0 ]]; do
         --output-dir)     OUTPUT_DIR="${2:-}"; shift 2 ;;
         --sync-offset-ms) SYNC_OVERRIDE_MS="${2:-}"; shift 2 ;;
         --youtube)        YOUTUBE=true; shift ;;
+        --cameras)        CAMERA_SOURCES+=("${2:-}"); shift 2 ;;
+        --cameras-sync-only) CAMERA_RENDER=false; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --no-isolated)    KEEP_ISOLATED=false; shift ;;
         --help|-h)     usage 0 ;;
@@ -67,6 +79,9 @@ done
 MANIFEST="$SESSION_DIR/manifest.json"
 [[ -f "$MANIFEST" ]] || { echo "❌ Nema manifesta: $MANIFEST"; exit 1; }
 OUTPUT_DIR="${OUTPUT_DIR:-$SESSION_DIR/final}"
+if [[ ${#CAMERA_SOURCES[@]} -eq 0 && -d "$SESSION_DIR/cameras" ]]; then
+    CAMERA_SOURCES=("$SESSION_DIR/cameras")
+fi
 
 # --- 2. ALATI ---
 NEEDED=(ffmpeg ffprobe python3)
@@ -644,6 +659,23 @@ fi
 echo "✅ Miks: $MIX_WAV"
 echo ""
 
+# --- 9b. DODATNE KAMERE (0..N telefona) ---
+# Svaka kamera ima vlastiti sat, ali i vlastiti mikrofon u istoj datoteci, pa se
+# poravnava na gotov miks — istu vremensku crtu na koju je postavljena i SD
+# snimka. Ne treba ni manifest ni mreža: samo da kamera čuje istu prostoriju.
+CAMERAS_FAILED=false
+if [[ ${#CAMERA_SOURCES[@]} -gt 0 ]]; then
+    echo "📱 Dodatne kamere: ${CAMERA_SOURCES[*]}"
+    CAMERA_ARGS=(--master "$MIX_WAV" --cameras "${CAMERA_SOURCES[@]}" --out "$OUTPUT_DIR/cameras")
+    [[ "$CAMERA_RENDER" == true ]] && CAMERA_ARGS+=(--render --grid)
+    if ! python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sync_cameras.py" "${CAMERA_ARGS[@]}"; then
+        # Kamera koja se ne da poravnati ne smije srušiti audio i glavnu kameru.
+        CAMERAS_FAILED=true
+        echo "⚠️  Barem jedna kamera nije poravnata — vidi $OUTPUT_DIR/cameras/multicam_sync.json"
+    fi
+    echo ""
+fi
+
 # --- 10. OZNAKE ---
 if [[ ${#MARKER_TIMES[@]} -gt 0 ]]; then
     MARKERS_FILE="$OUTPUT_DIR/markers.txt"
@@ -659,8 +691,13 @@ fi
 
 # --- 11. MUX SA SD SNIMKOM (bez renderiranja) ---
 if [[ ${#LUMIX_VIDS[@]} -eq 0 ]]; then
-    echo "ℹ️  Bez --lumix — obrađen je samo audio."
+    if [[ ${#CAMERA_SOURCES[@]} -gt 0 ]]; then
+        echo "ℹ️  Bez --lumix — obrađeni su audio i dodatne kamere."
+    else
+        echo "ℹ️  Bez --lumix — obrađen je samo audio."
+    fi
     [[ "$YOUTUBE" == true ]] && echo "   (--youtube preskočen: nema videa za isporuku)"
+    [[ "$CAMERAS_FAILED" == true ]] && echo "⚠️  Neke dodatne kamere NISU poravnate — vidi $OUTPUT_DIR/cameras/multicam_sync.json"
     echo "🏁 Gotovo."
     exit 0
 fi
@@ -711,4 +748,5 @@ fi
 echo "📁 Sadržaj izlazne mape:"
 ls -lh "$OUTPUT_DIR"
 echo ""
+[[ "$CAMERAS_FAILED" == true ]] && echo "⚠️  Neke dodatne kamere NISU poravnate — vidi $OUTPUT_DIR/cameras/multicam_sync.json"
 echo "🏁 Gotovo."

@@ -148,66 +148,71 @@ def expected_frames(track, source_frames):
     return round(source_frames * NOM / measured), "single", worst_ms
 
 
-with tempfile.TemporaryDirectory() as temporary:
-    session = Path(temporary) / "session"
-    manifest = build_session(session)
+def main():
+    with tempfile.TemporaryDirectory() as temporary:
+        session = Path(temporary) / "session"
+        manifest = build_session(session)
 
-    result = run(["bash", str(SCRIPT), "--session", str(session)])
-    expect(result.returncode == 0, "finalize_session.sh se izvršio")
-    if result.returncode != 0:
-        print(result.stdout[-2500:])
-        print(result.stderr[-1500:])
+        result = run(["bash", str(SCRIPT), "--session", str(session)])
+        expect(result.returncode == 0, "finalize_session.sh se izvršio")
+        if result.returncode != 0:
+            print(result.stdout[-2500:])
+            print(result.stderr[-1500:])
+            sys.exit(1)
+
+        output = result.stdout
+        expect("+90.0 ms" in output or "+90." in output,
+               "izmjereni pomak mikrofon→slika je primijenjen (medijan ~90 ms)")
+        expect("drift po dijelovima" in output, "piecewise putanja se aktivirala za mic-1")
+
+        anchor = manifest["tracks"][0]["firstSampleHostNanos"]
+        for track in manifest["tracks"]:
+            if track.get("kind") != "microphone":
+                continue
+            tid = track["id"]
+            source_frames = frame_count(session / track["relativePath"])
+            drift_frames, mode, worst_ms = expected_frames(track, source_frames)
+
+            offset = (track["firstSampleHostNanos"] - anchor) / 1e9 + SYNC_MS / 1000.0
+            if offset >= 0.0005:
+                total = drift_frames + round(round(offset * 1000) / 1000.0 * NOM)
+            elif offset <= -0.0005:
+                total = drift_frames - round(abs(offset) * NOM)
+            else:
+                total = drift_frames
+
+            actual = frame_count(session / "final" / "aligned" / f"{tid}_aligned.wav")
+            delta_ms = abs(actual - total) / NOM * 1000
+            expect(delta_ms < 1.0,
+                   f"{tid} [{mode}, nelinearnost {worst_ms:.1f} ms]: "
+                   f"{actual} uzoraka, očekivano {total} (razlika {delta_ms:.2f} ms)")
+
+        # The very first trajectory point carries frameCount 0. Treating that as
+        # falsy drops it, which shifts the baseline and silently rescales every rate.
+        points = manifest["tracks"][1]["driftSamples"]
+        expect(points[0]["frameCount"] == 0, "test podaci sadrže frameCount 0 na prvoj točki")
+        reader = run(["bash", "-c",
+                      f"sed -n '/^read_manifest() {{/,/^}}/p' {SCRIPT} > /tmp/_r.sh && "
+                      f"printf 'MANIFEST=\"$1\"\\nread_manifest\\n' >> /tmp/_r.sh && "
+                      f"bash /tmp/_r.sh {session / 'manifest.json'}"])
+        drift_line = [l for l in reader.stdout.splitlines() if l.startswith("MICDRIFT\tmic-1")]
+        expect(bool(drift_line) and drift_line[0].split("\t")[-1] == str(len(points)),
+               f"nijedna točka trajektorije nije odbačena ({len(points)} točaka)")
+
+        # Format must survive the split-and-concat.
+        info = run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                    "stream=codec_name,sample_rate,channels", "-of", "csv=p=0",
+                    str(session / "final" / "aligned" / "mic-1_aligned.wav")]).stdout.strip()
+        expect(info == "pcm_s24le,48000,1", f"format očuvan nakon spajanja dijelova ({info})")
+
+        expect((session / "final" / "mix.wav").exists(), "miks je napravljen")
+
+    print("")
+    if FAILURES:
+        print("🛑 %d neuspješnih." % len(FAILURES))
         sys.exit(1)
+    print("🏁 Svi finalize testovi prošli.")
 
-    output = result.stdout
-    expect("+90.0 ms" in output or "+90." in output,
-           "izmjereni pomak mikrofon→slika je primijenjen (medijan ~90 ms)")
-    expect("drift po dijelovima" in output, "piecewise putanja se aktivirala za mic-1")
 
-    anchor = manifest["tracks"][0]["firstSampleHostNanos"]
-    for track in manifest["tracks"]:
-        if track.get("kind") != "microphone":
-            continue
-        tid = track["id"]
-        source_frames = frame_count(session / track["relativePath"])
-        drift_frames, mode, worst_ms = expected_frames(track, source_frames)
-
-        offset = (track["firstSampleHostNanos"] - anchor) / 1e9 + SYNC_MS / 1000.0
-        if offset >= 0.0005:
-            total = drift_frames + round(round(offset * 1000) / 1000.0 * NOM)
-        elif offset <= -0.0005:
-            total = drift_frames - round(abs(offset) * NOM)
-        else:
-            total = drift_frames
-
-        actual = frame_count(session / "final" / "aligned" / f"{tid}_aligned.wav")
-        delta_ms = abs(actual - total) / NOM * 1000
-        expect(delta_ms < 1.0,
-               f"{tid} [{mode}, nelinearnost {worst_ms:.1f} ms]: "
-               f"{actual} uzoraka, očekivano {total} (razlika {delta_ms:.2f} ms)")
-
-    # The very first trajectory point carries frameCount 0. Treating that as
-    # falsy drops it, which shifts the baseline and silently rescales every rate.
-    points = manifest["tracks"][1]["driftSamples"]
-    expect(points[0]["frameCount"] == 0, "test podaci sadrže frameCount 0 na prvoj točki")
-    reader = run(["bash", "-c",
-                  f"sed -n '/^read_manifest() {{/,/^}}/p' {SCRIPT} > /tmp/_r.sh && "
-                  f"printf 'MANIFEST=\"$1\"\\nread_manifest\\n' >> /tmp/_r.sh && "
-                  f"bash /tmp/_r.sh {session / 'manifest.json'}"])
-    drift_line = [l for l in reader.stdout.splitlines() if l.startswith("MICDRIFT\tmic-1")]
-    expect(bool(drift_line) and drift_line[0].split("\t")[-1] == str(len(points)),
-           f"nijedna točka trajektorije nije odbačena ({len(points)} točaka)")
-
-    # Format must survive the split-and-concat.
-    info = run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
-                "stream=codec_name,sample_rate,channels", "-of", "csv=p=0",
-                str(session / "final" / "aligned" / "mic-1_aligned.wav")]).stdout.strip()
-    expect(info == "pcm_s24le,48000,1", f"format očuvan nakon spajanja dijelova ({info})")
-
-    expect((session / "final" / "mix.wav").exists(), "miks je napravljen")
-
-print("")
-if FAILURES:
-    print("🛑 %d neuspješnih." % len(FAILURES))
-    sys.exit(1)
-print("🏁 Svi finalize testovi prošli.")
+if __name__ == "__main__":
+    main()
