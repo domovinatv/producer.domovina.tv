@@ -136,6 +136,7 @@ Sidecar dobiva `"version": 2` i blok:
 - `fileZeroDeviceNs`: vrijeme na satu uređaja koje odgovara vremenu 0 videotraga u
   datoteci (PTS 0 prvog framea). Ovo je jedini broj koji veže sliku za sat; mora
   biti točan na par ms, ne „otprilike kad je krenulo".
+- `startAtServerMs` (vrh sidecara, opcionalno): trenutak u kojem je režija tražila start.
 - `samples`: svi `time` uzorci od spajanja do kraja uploada tog takea (barem ±10 min
   oko snimke), `t1`/`t4` = sat uređaja (ns) pri slanju/primitku, `s` = sat relaya (ms).
 

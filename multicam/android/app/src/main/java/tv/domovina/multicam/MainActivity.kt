@@ -136,6 +136,8 @@ private fun Screen(c: CameraController, onPreview: (PreviewView) -> Unit) {
         // Dolje lijevo: upload, upozorenja, greške.
         Column(Modifier.align(Alignment.BottomStart).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (c.room == null) Label("Skeniraj QR kod iz studija (domovinacam:// link) da se kamera spoji.")
+            c.scheduledInfo?.let { Label(it) }
+            c.clockInfo?.let { if (c.connected) Label(it, Color(0xFFB0BEC5)) }
             c.uploadProgress?.let { (d, t) -> Label("Upload %d%% (%.0f / %.0f MB)".format(if (t > 0) 100 * d / t else 0, d / 1e6, t / 1e6)) }
             c.fpsInfo?.let { Label("⚠ $it") }
             c.lastError?.let { Label("⚠ $it", Color(0xFFFF8A80)) }

@@ -112,12 +112,29 @@ switch (cmd) {
 		const seen = new Set();
 		const ws = await director((m) => {
 			if (m.type === "uploaded" && m.sessionId === sessionId) {
-				seen.add(m.cameraId);
+				seen.add(m.objectKeys[0]?.split("/")[2] ?? m.cameraId);
 				console.log(`✅ ${m.cameraName}: ${m.objectKeys.join(", ")}`);
-				if (seen.size >= Number(n)) ws.close();
+				if (new Set([...seen].map((k) => k.replace(/^r2:/, ""))).size >= Number(n)) ws.close();
 			}
 			if (m.type === "cameras") for (const c of m.cameras) if (c.status?.state === "error") console.log(`⚠️  ${c.name}: ${c.status.error}`);
 		});
+		// Telefon koji je uploadao prije nego se režija spojila ne pošalje više
+		// događaj — zato se broje i kamere koje već imaju sidecar u R2.
+		const poll = async () => {
+			const r = await fetch(`${RELAY}/v1/list?prefix=multicam/${sessionId}/`, { headers: auth });
+			const { objects = [] } = await r.json();
+			for (const o of objects) {
+				const cam = o.key.split("/")[2];
+				if (o.key.endsWith(".json") && !seen.has(`r2:${cam}`)) {
+					seen.add(`r2:${cam}`);
+					console.log(`✅ ${cam}: ${o.key} (već u R2)`);
+				}
+			}
+			const cams = new Set([...seen].map((k) => k.replace(/^r2:/, "")));
+			if (cams.size >= Number(n)) process.exit(0);
+		};
+		poll();
+		setInterval(poll, 15000);
 		setTimeout(() => {
 			console.log(`⏱  timeout, ${seen.size}/${n}`);
 			process.exit(1);

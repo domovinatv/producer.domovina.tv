@@ -7,11 +7,15 @@ import Foundation
 final class RelayClient: NSObject {
 
     enum Command {
-        case start(sessionId: String, takeId: String)
+        case start(sessionId: String, takeId: String, startAtServerMs: Double?)
         case stop(takeId: String)
+        /// The relay's current take (nil = none), sent on every connect.
+        case state(takeId: String?)
     }
 
     var onCommand: ((Command) -> Void)?
+    /// Every `time` reply, on the host clock (PROTOCOL.md "Sat").
+    var onClockSample: ((ClockSample) -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
     /// Called on every (re)connect so the owner can send hello + fresh status.
     var onConnected: (() -> Void)?
@@ -27,6 +31,10 @@ final class RelayClient: NSObject {
     private var reconnectWork: DispatchWorkItem?
     private var timeSamplesLeft = 0
     private var bestRTT = Double.infinity
+    /// Probes in flight: `c` (wall ms, echoed by the relay) → host ns at send.
+    private var probes: [Int64: (t1: Int64, wallMs: Double)] = [:]
+    private var timeTimer: Timer?
+    private var burstRTTs: [Double] = []
 
     override init() {
         super.init()
@@ -60,11 +68,13 @@ final class RelayClient: NSObject {
 
     private func receive(on task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
+            // Arrival time before any hop, so main-thread work does not inflate RTT.
+            let t4 = HostClock.nowNs()
             Task { @MainActor in
                 guard let self, task === self.task else { return }
                 switch result {
                 case .success(let message):
-                    if case .string(let text) = message { self.handle(text) }
+                    if case .string(let text) = message { self.handle(text, receivedNs: t4) }
                     self.receive(on: task)
                 case .failure(let error):
                     self.dropped("receive: \(error.localizedDescription)")
@@ -73,27 +83,37 @@ final class RelayClient: NSObject {
         }
     }
 
-    private func handle(_ text: String) {
+    private func handle(_ text: String, receivedNs t4: Int64) {
         guard let data = text.data(using: .utf8),
               let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = msg["type"] as? String else { return }
         switch type {
         case "start":
             guard let sessionId = msg["sessionId"] as? String, let takeId = msg["takeId"] as? String else { return }
-            onCommand?(.start(sessionId: sessionId, takeId: takeId))
+            onCommand?(.start(sessionId: sessionId, takeId: takeId,
+                              startAtServerMs: (msg["startAtServerMs"] as? NSNumber)?.doubleValue))
         case "stop":
             onCommand?(.stop(takeId: msg["takeId"] as? String ?? ""))
+        case "state":
+            let take = msg["take"] as? [String: Any]
+            onCommand?(.state(takeId: take?["takeId"] as? String))
         case "time":
-            guard let c = msg["c"] as? Double, let s = msg["s"] as? Double else { return }
-            let now = Date().timeIntervalSince1970 * 1000
-            let rtt = now - c
+            guard let c = (msg["c"] as? NSNumber)?.int64Value, let s = (msg["s"] as? NSNumber)?.int64Value,
+                  let probe = probes.removeValue(forKey: c) else { return }
+            let sample = ClockSample(t1: probe.t1, t4: t4, s: s)
+            onClockSample?(sample)
+            // Wall-clock offset for the v1 `serverOffsetMs` field.
+            let rtt = Double(sample.rttNs) / 1e6
             if rtt < bestRTT {
                 bestRTT = rtt
-                serverOffsetMs = s - (c + rtt / 2)
+                serverOffsetMs = Double(s) - (probe.wallMs + rtt / 2)
             }
-            timeSamplesLeft -= 1
-            if timeSamplesLeft > 0 { sendTimeProbe() } else {
-                Log.write("time sync: offset \(serverOffsetMs.map { String(format: "%.1f", $0) } ?? "?") ms, rtt \(String(format: "%.1f", bestRTT)) ms")
+            if timeSamplesLeft > 0 {
+                burstRTTs.append(rtt)
+                timeSamplesLeft -= 1
+                if timeSamplesLeft > 0 { sendTimeProbe() } else {
+                    Log.write("time sync: offset \(serverOffsetMs.map { String(format: "%.1f", $0) } ?? "?") ms, burst rtt \(burstRTTs.map { String(format: "%.0f", $0) }.joined(separator: "/")) ms, then every 5 s")
+                }
             }
         default:
             break
@@ -114,7 +134,15 @@ final class RelayClient: NSObject {
     }
 
     private func sendTimeProbe() {
-        send(["type": "time", "c": Date().timeIntervalSince1970 * 1000])
+        guard connected else { return }
+        let wallMs = Date().timeIntervalSince1970 * 1000
+        var c = Int64(wallMs)
+        while probes[c] != nil { c += 1 }
+        // A probe whose reply never came (socket died) is forgotten after a minute.
+        let t1 = HostClock.nowNs()
+        probes = probes.filter { t1 - $0.value.t1 < ClockMath.minute }
+        probes[c] = (t1, wallMs)
+        send(["type": "time", "c": c])
     }
 
     private func didOpen() {
@@ -124,14 +152,29 @@ final class RelayClient: NSObject {
         onConnectionChange?(true)
         onConnected?()
         bestRTT = .infinity
+        probes = [:]
+        burstRTTs = []
         timeSamplesLeft = 5
         sendTimeProbe()
+        // Keep sampling for as long as the socket lives, not just at connect: post
+        // fits offset and drift through the minimum-RTT samples around each take.
+        timeTimer?.invalidate()
+        timeTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.connected else { return }
+                // A burst probe whose reply was lost must not stall sampling.
+                self.timeSamplesLeft = 0
+                self.sendTimeProbe()
+            }
+        }
     }
 
     private func dropped(_ reason: String) {
         guard task != nil else { return }
         if connected { Log.write("relay dropped: \(reason)") }
         connected = false
+        timeTimer?.invalidate()
+        timeTimer = nil
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         onConnectionChange?(false)

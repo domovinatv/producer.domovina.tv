@@ -15,6 +15,9 @@ struct PendingUpload: Codable, Equatable {
     var parts: [Part] = []
     var videoKey: String?
     var sidecarKey: String?
+    /// Relay−host offset (ms) at the take, which identifies its boot's clock
+    /// samples (nil: no sample yet, or a pre-v2 entry).
+    var clockOffsetMs: Double?
 
     struct Part: Codable, Equatable {
         var partNumber: Int
@@ -32,6 +35,8 @@ final class Uploader {
     var onProgress: ((Progress?) -> Void)?
     var onUploaded: ((PendingUpload) -> Void)?
     var onError: ((String?) -> Void)?
+    /// Called with the sidecar's local URL just before it is uploaded.
+    var beforeSidecarUpload: ((PendingUpload, URL) -> Void)?
 
     private var queue: [PendingUpload]
     private var running = false
@@ -147,7 +152,9 @@ final class Uploader {
         }
 
         if item.sidecarKey == nil {
-            let data = try Data(contentsOf: documents.appendingPathComponent(item.sidecarFile))
+            let sidecarURL = documents.appendingPathComponent(item.sidecarFile)
+            beforeSidecarUpload?(item, sidecarURL)
+            let data = try Data(contentsOf: sidecarURL)
             let query = [URLQueryItem(name: "sessionId", value: item.sessionId),
                          URLQueryItem(name: "camera", value: item.camera),
                          URLQueryItem(name: "file", value: item.sidecarFile)]

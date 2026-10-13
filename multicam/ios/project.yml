@@ -49,3 +49,34 @@ targets:
           - CFBundleURLName: tv.domovina.multicam
             CFBundleURLSchemes:
               - domovinacam
+
+  # Logic tests (no host app, no camera): clock math, take rules, the clock log,
+  # and the AVAssetWriter path fed with synthetic host-clock buffers.
+  #   xcodebuild test -project DomovinaKamera.xcodeproj -scheme DomovinaKamera \
+  #     -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath build
+  DomovinaKameraTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: DomovinaKameraTests
+      - path: DomovinaKamera/HostClock.swift
+      - path: DomovinaKamera/ClockMath.swift
+      - path: DomovinaKamera/ClockLog.swift
+      - path: DomovinaKamera/TakeWriter.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.domovina.multicam.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  DomovinaKamera:
+    build:
+      targets:
+        DomovinaKamera: all
+        DomovinaKameraTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - DomovinaKameraTests

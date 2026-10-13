@@ -29,4 +29,11 @@ Navodnici unutar navodnika su nužni, inače `adb shell` odreže sve iza prvog `
 - Snimke ostaju na telefonu: `/sdcard/Android/data/tv.domovina.multicam/files/takes/` (uz svaku i sidecar `.json`).
 - Upload nakon stopa ide u dijelovima od 32 MiB. Red čekanja je u `files/pending/`, pa se upload nastavlja i nakon što se aplikacija ubije.
 - Kad se aplikacija spoji dok take traje, odmah se pridruži snimanju. Snimka prekinuta ubijanjem aplikacije ostaje nečitljiva (nema `moov`) i ne uploada se.
-- `startWallClockMs` se uzima u trenutku CameraX događaja `VideoRecordEvent.Start`.
+- Gubitak veze nikad ne zaustavlja snimanje. Pri ponovnom spajanju relay pošalje `state`; ako snimam take koji više nije aktivan (stop je stigao dok sam bio offline), zaustavim ga i uploadam.
+- `start` nosi `startAtServerMs`: snimanje kreće kad sat relaya (procjena iz uzorka s najkraćim RTT-om u zadnjih 5 min) dođe do tog trenutka, ranije za naučeno kašnjenje CameraX-a od `start` do prvog framea (~120–200 ms, pomični prosjek u prefs `startLatencyMs`). Ako je trenutak prošao, odmah.
+
+## Sat (sidecar v2)
+
+- Dok je spojen, telefon šalje `time` svakih 5 s (plus pet zaredom pri spajanju). Svaki odgovor `{t1, t4, s}` (t1/t4 = `elapsedRealtimeNanos`, t4 uzet na niti čitača socketa) dopisuje se u `files/clock/samples-boot<N>.txt` — jedna datoteka po paljenju telefona, jer se elapsedRealtime resetira pri bootu.
+- Sidecar dobije sve uzorke od 15 min prije snimke; neposredno prije uploada sidecara (nakon videa) lista se osvježi do tog trenutka, i nakon restarta aplikacije.
+- `fileZeroDeviceNs`: CameraX `Recorder` pamti PTS prvog videoframea u privatnom polju `mFirstRecordingVideoDataTimeUs` (System.nanoTime µs; enkoder ga dobije iz senzorskog REALTIME vremena fiksnim pomakom) i oduzima ga od svih PTS-ova — to je točno nula mp4-a (zvuk prije prvog framea Recorder baca). Čita se refleksijom i pretvara natrag u elapsedRealtime, pa se provjeri prema Camera2 `SENSOR_TIMESTAMP` iz CaptureCallbacka: na oba testna telefona razlika je ≤1 µs, pa se uzima senzorsko vrijeme (nesigurnost 0,1 ms). Ako refleksija ne uspije (nova verzija CameraX-a), rezerva je `status-min` (min vremena Status događaja − trajanje), ~30 ms lošije.

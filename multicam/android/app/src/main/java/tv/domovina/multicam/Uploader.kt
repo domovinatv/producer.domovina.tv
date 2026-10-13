@@ -27,6 +27,8 @@ class Uploader(
     private val onProgress: (bytesDone: Long, bytesTotal: Long) -> Unit,
     private val onDone: (sessionId: String, takeId: String, objectKeys: List<String>) -> Unit,
     private val onError: (String?) -> Unit,
+    /** Pozvan neposredno prije uploada sidecara (nakon videa): dopuni ga uzorcima sata do sad. */
+    private val refreshSidecar: (job: JSONObject, sidecar: File) -> Unit = { _, _ -> },
 ) {
     private val executor = Executors.newSingleThreadExecutor()
     private val http = OkHttpClient.Builder()
@@ -41,10 +43,11 @@ class Uploader(
         pendingDir.mkdirs()
     }
 
-    fun enqueue(sessionId: String, takeId: String, camera: String, video: File, sidecar: File) {
+    fun enqueue(sessionId: String, takeId: String, camera: String, video: File, sidecar: File, boot: Int) {
         val job = JSONObject()
             .put("sessionId", sessionId).put("takeId", takeId).put("camera", camera)
             .put("video", video.absolutePath).put("sidecar", sidecar.absolutePath)
+            .put("boot", boot)
             .put("parts", JSONArray())
         File(pendingDir, "$takeId.json").writeText(job.toString())
         kick()
@@ -120,6 +123,11 @@ class Uploader(
         }
         if (done.optLong("size") != total) throw IllegalStateException("R2 javlja ${done.optLong("size")} B, lokalno $total B")
 
+        try {
+            refreshSidecar(job, sidecar)
+        } catch (e: Exception) {
+            Log.w(RelayClient.TAG, "osvježavanje sidecara nije uspjelo: ${e.message}")
+        }
         val sidecarKey = retry {
             call(
                 Request.Builder().url(
