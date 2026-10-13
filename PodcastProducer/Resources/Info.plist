@@ -28,5 +28,22 @@
 	<string>DOMOVINA Studio snima video s Lumix GH5 kamere preko Elgato capture uređaja.</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.video</string>
+	<!-- CFBundleVersion iznad je samo zadana vrijednost: build_app.sh ga
+	     prepiše brojem commitova. Sparkle uspoređuje baš taj broj, pa bez toga
+	     nikad ne bi vidio noviju verziju. -->
+	<!-- Sparkle. Manifest i zipovi su na javnom R2 bucketu domovina-studio-releases
+	     (račun D.O.M.); release.sh --publish ih tamo stavlja. Javni ključ odgovara
+	     privatnom u keychainu (račun "domovina-studio") i kopiji na vanjskom disku,
+	     domovina_studio_build_files/credentials/sparkle-eddsa-private.key.
+	     Izgubi li se privatni ključ, nijedna instalacija više ne prihvaća update. -->
+	<key>SUFeedURL</key>
+	<string>https://pub-3688cad79e324f92a17a1e66f96bd923.r2.dev/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>XA0SbNQCajeyXPVkL8AlRb/JzohWqRHc8A75ujqsuY8=</string>
+	<!-- Bez ovoga Sparkle pri prvom pokretanju pita „smijem li provjeravati sam". -->
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>3600</integer>
 </dict>
 </plist>

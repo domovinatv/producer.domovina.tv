@@ -5,6 +5,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
+        AppUpdater.shared.start()
         DispatchQueue.main.async {
             NSApp.windows.first?.zoom(nil)
         }
@@ -27,7 +28,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 /// Tiny bridge so the AppKit delegate can see SwiftUI state.
 final class RecordingGuard {
     static let shared = RecordingGuard()
-    var isRecording = false
+    var isRecording = false {
+        didSet { if oldValue && !isRecording { AppUpdater.shared.recordingDidStop() } }
+    }
 }
 
 @main
@@ -39,5 +42,10 @@ struct PodcastProducerApp: App {
             RootView()
         }
         .defaultSize(width: 1280, height: 820)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesMenuItem(updater: AppUpdater.shared.updater)
+            }
+        }
     }
 }

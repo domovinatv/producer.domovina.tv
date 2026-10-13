@@ -29,13 +29,22 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="/Applications"
 INSTALLED_BUNDLE="$INSTALL_DIR/$APP_NAME.app"
 BUNDLE_ID="tv.domovina.studio"
+ENTITLEMENTS="$PACKAGE_DIR/Resources/PodcastProducer.entitlements"
+# Developer ID (ITalk) za SVAKI build, i lokalni: TCC pamti dozvolu za mikrofon
+# i kameru po identifikatoru + timu, pa potpisan build zadržava dozvole iz
+# builda u build. Ad-hoc potpis je hash binarnog, pa bi svaki build ponovno pitao.
+# Bez certifikata u keychainu pada na ad-hoc (radi, ali Sparkle ga ne ažurira).
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: ITalk d.o.o. (6SCK58757K)}"
+# Sparkle uspoređuje CFBundleVersion, pa mora rasti s repozitorijem: broj commitova.
+BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$REPO_ROOT" rev-list --count HEAD)}"
 
 command -v swift >/dev/null 2>&1 || { echo "❌ Swift toolchain nije pronađen."; exit 1; }
 
 echo "🔨 Build ($CONFIGURATION)…"
 cd "$PACKAGE_DIR"
 swift build -c "$CONFIGURATION"
-BINARY="$(swift build -c "$CONFIGURATION" --show-bin-path)/PodcastProducer"
+BIN_PATH="$(swift build -c "$CONFIGURATION" --show-bin-path)"
+BINARY="$BIN_PATH/PodcastProducer"
 [[ -f "$BINARY" ]] || { echo "❌ Izvršna datoteka nije pronađena: $BINARY"; exit 1; }
 
 echo "📦 Pakiram ${APP_BUNDLE}…"
@@ -44,6 +53,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 
 cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/PodcastProducer"
 cp "$PACKAGE_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP_BUNDLE/Contents/Info.plist"
 cp "$PACKAGE_DIR/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
 
@@ -54,15 +64,34 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/scripts"
 cp "$REPO_ROOT/scripts/"*.sh "$REPO_ROOT/scripts/"*.py "$APP_BUNDLE/Contents/Resources/scripts/"
 chmod +x "$APP_BUNDLE/Contents/Resources/scripts/"*.sh "$APP_BUNDLE/Contents/Resources/scripts/"*.py
 
-# Ad-hoc potpis. Bez potpisa macOS ponekad odbije TCC zahtjev bez ikakve poruke,
-# a dopuštenja se resetiraju pri svakom buildu.
-echo "🔐 Ad-hoc potpisivanje…"
-codesign --force --deep --sign - \
-    --identifier "$BUNDLE_ID" \
-    "$APP_BUNDLE" 2>&1 | sed 's/^/   /' || {
-    echo "⚠️  Potpisivanje nije uspjelo — aplikacija će raditi, ali će macOS možda"
-    echo "   tražiti dopuštenja pri svakom pokretanju."
-}
+# Sparkle.framework: Xcode bi ga sam ugradio, swift build ga samo stavi pored
+# binarnog. ditto čuva simlinkove unutar frameworka (Versions/Current), cp -R ne
+# uvijek. Binarni ga traži preko @rpath, a SwiftPM daje samo @loader_path
+# (Contents/MacOS), pa dodajemo i Contents/Frameworks.
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+ditto "$BIN_PATH/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/PodcastProducer"
+
+# Potpis iznutra prema van, bez --deep (Apple ga ne preporučuje: svemu da iste
+# entitlemente). Redoslijed za Sparkle je iz njegove dokumentacije za Developer ID.
+# Hardened runtime (-o runtime) i --timestamp traži notarizacija.
+SPARKLE="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+if security find-identity -v -p codesigning | grep -qF "$SIGN_IDENTITY"; then
+    echo "🔐 Potpisujem: $SIGN_IDENTITY"
+    sign() { codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$@"; }
+    sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+    sign --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+    sign "$SPARKLE/Versions/B/Autoupdate"
+    sign "$SPARKLE/Versions/B/Updater.app"
+    sign "$SPARKLE"
+    sign --identifier "$BUNDLE_ID" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+    codesign --verify --strict --deep "$APP_BUNDLE"
+else
+    echo "⚠️  Nema certifikata \"$SIGN_IDENTITY\" — ad-hoc potpis."
+    echo "   Aplikacija radi, ali macOS će nakon svakog builda opet pitati za"
+    echo "   mikrofon/kameru, a Sparkle je neće moći ažurirati."
+    codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE"
+fi
 
 # --- Instalacija u /Applications ---------------------------------------------
 # Bez ovoga se kopija u /Applications tiho razilazi od repozitorija: rebuild ide
@@ -98,7 +127,7 @@ if [[ "$INSTALL" == true ]]; then
 fi
 
 echo ""
-echo "✅ Gotovo: $APP_BUNDLE"
+echo "✅ Gotovo: $APP_BUNDLE (build $BUILD_NUMBER)"
 if [[ "$INSTALL" == true ]]; then
     echo "✅ Instalirano: $INSTALLED_BUNDLE"
 fi
