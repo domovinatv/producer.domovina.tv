@@ -503,3 +503,7 @@ Konkretno, po redu:
 
 Ono što nikako ne radi: pretpostaviti da je pomak konstantan i ispraviti ga jednom
 na početku. Na 20 minuta prođe. Na 180 ne.
+
+## Vezani dokumenti
+
+- [Multicam: telefoni kao dodatne kamere](2026-10-13-multicam.md) — ista ideja (zvuk putuje sa slikom) primijenjena na N telefona, plus poravnanje po satu relaya kad kamere ne čuju isto
