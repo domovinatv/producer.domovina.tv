@@ -45,8 +45,17 @@ su JSON s poljem `type`. Klijent se nakon prekida spaja ponovno (backoff 1→10 
 
 | type | polja |
 |---|---|
-| `start` | `sessionId, takeId` (opcionalno `target` = deviceId, inače svima) |
+| `start` | `sessionId, takeId`, opcionalno `atServerMs` i `target` (deviceId, inače svima) |
 | `stop` | `takeId` |
+
+Relay kamerama prosljeđuje `start` s `startAtServerMs` (zadano: 2 s nakon
+naredbe). Kamera počinje kad njen sat, preveden na sat relaya, dođe do tog trenutka
+— tako svi telefoni krenu zajedno bez obzira na latenciju. Ako je trenutak već
+prošao (kasno spajanje), počinje odmah.
+
+Pri svakom spajanju kamera dobije `{type:"state", take: {…}|null}`. Ako snima
+take koji relay više ne smatra aktivnim (stop je stigao dok je bila offline),
+zaustavlja ga. **Gubitak veze nikad ne zaustavlja snimanje.**
 
 Relay pamti trenutni take. Kamera koja se spoji (ili ponovno spoji) dok take traje
 odmah dobije `start` — **kamera koja već snima isti `takeId` ga ignorira**; `start`
@@ -100,3 +109,35 @@ Preuzimanje (režija): `GET /v1/list?prefix=multicam/{sessionId}/`,
 
 `startWallClockMs + serverOffsetMs` je grubo (±50 ms) vrijeme početka po satu
 relaya. Post ga koristi samo da suzi prozor pretrage; poravnanje radi korelacija.
+
+## Sat (verzija 2 sidecara)
+
+Na stadionu se kamere ne mogu poravnati zvukom (zvuk prijeđe igralište za
+~300 ms), pa se poravnavaju po satu relaya. Zato telefon **cijelo vrijeme dok je
+spojen** (ne samo pri spajanju) šalje `time` svakih 5 s i pamti svaki odgovor,
+a mreža smije pucati — post koristi samo uzorke s najkraćim RTT-om.
+
+Sve se mjeri na **monotonom satu uređaja**, istom na kojem su vremena frameova:
+Android `SystemClock.elapsedRealtimeNanos()`, iOS host clock
+(`mach_absolute_time` → ns, isto što `CMClockGetHostTimeClock`).
+
+Sidecar dobiva `"version": 2` i blok:
+
+```json
+"clock": {
+  "domain": "android-elapsedRealtime" | "ios-hostTime",
+  "fileZeroDeviceNs": 123456789000,
+  "fileZeroMethod": "…kako je izmjereno…",
+  "fileZeroUncertaintyMs": 2.0,
+  "samples": [ {"t1": 1000, "t4": 1031000000, "s": 1760000000123}, … ]
+}
+```
+
+- `fileZeroDeviceNs`: vrijeme na satu uređaja koje odgovara vremenu 0 videotraga u
+  datoteci (PTS 0 prvog framea). Ovo je jedini broj koji veže sliku za sat; mora
+  biti točan na par ms, ne „otprilike kad je krenulo".
+- `samples`: svi `time` uzorci od spajanja do kraja uploada tog takea (barem ±10 min
+  oko snimke), `t1`/`t4` = sat uređaja (ns) pri slanju/primitku, `s` = sat relaya (ms).
+
+Post: `server_ms ≈ s` u trenutku `(t1+t4)/2`; pravac kroz uzorke s najmanjim RTT-om
+daje pomak i drift sata uređaja prema relayu, a `fileZeroDeviceNs` vezu sa slikom.

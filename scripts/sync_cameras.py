@@ -16,8 +16,14 @@ istu prostoriju kao miks.
 Korelacija je GCC-PHAT (izbijeljeni spektar), jer telefon i PodMic imaju posve
 različit frekvencijski odziv; obična korelacija bi se zalijepila za bas i jeku.
 
-    sync_cameras.py --master miks.wav --cameras DIR_ILI_DATOTEKE… [--out DIR]
-                    [--render] [--grid] [--av-offset ime=ms …]
+Kad kamere ne čuju isto (stadion: zvuk prijeđe igralište za ~300 ms), radi se
+po satu: --sync clock (zadano kad nema --master) koristi blok `clock` iz sidecara
+(multicam/PROTOCOL.md, "Sat") — uzorke sata relaya kroz cijelu snimku i
+vrijeme prvog framea na satu uređaja. Kad postoje i miks i sat, sat služi kao
+neovisna provjera zvuka (clockVsAudioMs po kameri).
+
+    sync_cameras.py [--master miks.wav] --cameras DIR_ILI_DATOTEKE… [--out DIR]
+                    [--sync auto|audio|clock] [--render] [--grid] [--av-offset ime=ms …]
 
 Izlaz: <out>/multicam_sync.json, uz --render <out>/<kamera>.mov poravnat na
 vremensku crtu miksa (crno gdje kamera nije snimala, zvuk = miks), uz --grid
@@ -249,34 +255,128 @@ def find_cameras(paths):
     for p in map(Path, paths):
         files = [p] if p.is_file() else sorted(f for f in p.rglob("*") if f.suffix.lower() in VIDEO_EXT)
         for f in files:
-            name = None
+            name, sidecar = None, {}
             for side in f.parent.glob("*.json"):
                 try:
                     meta = json.loads(side.read_text())
                 except Exception:
                     continue
                 if meta.get("file") == f.name:
-                    name = meta.get("camera", {}).get("name")
-            found.append((name or (f.parent.name if f.parent != p or p.is_dir() else f.stem), f))
+                    name, sidecar = meta.get("camera", {}).get("name"), meta
+            found.append((name or (f.parent.name if f.parent != p or p.is_dir() else f.stem), f, sidecar))
     names = {}
     out = []
-    for name, f in found:
+    for name, f, meta in found:
         names[name] = names.get(name, 0) + 1
-        out.append((name if names[name] == 1 else f"{name}-{names[name]}", f))
+        out.append((name if names[name] == 1 else f"{name}-{names[name]}", f, meta))
     return out
+
+
+def clock_fit(meta):
+    """Gdje je slika kamere na satu relaya, iz sidecar v2 bloka `clock`.
+
+    Svaki uzorak kaže: kad je uređaj bio na (t1+t4)/2, relay je bio na s, uz
+    grešku do ±RTT/2. Mreža na stadionu puca i RTT skače, pa se iz svake
+    minute uzima samo najbrži uzorak, a od njih samo oni blizu najbržih — sporiji
+    uzorci nose asimetrično kašnjenje koje se ne poništava. Kroz preostale ide
+    pravac: pomak i drift sata uređaja prema relayu.
+
+    Vraća (A, B, info): t_relay [s] = A + B · t_datoteke [s], ili None.
+    """
+    clk = meta.get("clock") or {}
+    samples = clk.get("samples") or []
+    if clk.get("fileZeroDeviceNs") is None or not samples:
+        return None
+    t1 = np.array([x["t1"] for x in samples], float)
+    t4 = np.array([x["t4"] for x in samples], float)
+    srv = np.array([x["s"] for x in samples], float)
+    ok = t4 > t1
+    t1, t4, srv = t1[ok], t4[ok], srv[ok]
+    if not len(t1):
+        return None
+    rtt = (t4 - t1) / 1e6
+    mid = (t1 + t4) / 2e6                 # ms na satu uređaja
+    off = srv - mid                       # sat relaya − sat uređaja, ms
+
+    # U svakoj minuti ostaju uzorci blizu najbržeg u toj minuti (ruta se kroz
+    # utakmicu mijenja, pa je prag lokalan), i to samo minute čiji je najbrži
+    # uzorak blizu najbržeg uopće.
+    bins = np.floor(mid / 60000.0)
+    global_min = np.min(rtt)
+    pick = []
+    for b in np.unique(bins):
+        idx = np.where(bins == b)[0]
+        local = np.min(rtt[idx])
+        if local <= global_min + 50:
+            pick += [i for i in idx if rtt[i] <= local + 10]
+    pick = np.array(sorted(pick))
+
+    x0 = float(np.mean(mid[pick]))
+    span_s = float(np.ptp(mid[pick])) / 1000 if len(pick) > 1 else 0.0
+    if len(pick) >= 4 and span_s >= 120:
+        keep = np.ones(len(pick), bool)
+        # Težina 1/RTT²: greška asimetrije raste s RTT-om.
+        w = 1.0 / rtt[pick]
+        for _ in range(5):
+            g, c = np.polyfit(mid[pick][keep] - x0, off[pick][keep], 1, w=w[keep])
+            res = off[pick] - (c + g * (mid[pick] - x0))
+            mad = np.median(np.abs(res[keep] - np.median(res[keep])))
+            new = np.abs(res) < max(3.0, 3 * 1.4826 * mad)
+            if new.sum() < 4 or (new == keep).all():
+                break
+            keep = new
+        g, c = np.polyfit(mid[pick][keep] - x0, off[pick][keep], 1, w=w[keep])
+        res = off[pick][keep] - (c + g * (mid[pick][keep] - x0))
+    else:
+        # Premalo uzoraka za drift: samo pomak iz najbržeg.
+        j = pick[np.argmin(rtt[pick])]
+        g, c, keep, res = 0.0, float(off[j] - 0.0), np.array([True]), np.array([0.0])
+        x0 = float(mid[j])
+
+    fz = clk["fileZeroDeviceNs"] / 1e6
+    # t_relay(ms) = dev + c + g·(dev − x0), dev = fz + 1000·t
+    a_ms = fz + c + g * (fz - x0)
+    b = 1.0 + g
+    return a_ms / 1000.0, b, {
+        "clockDomain": clk.get("domain"),
+        "fileZeroMethod": clk.get("fileZeroMethod"),
+        "fileZeroUncertaintyMs": clk.get("fileZeroUncertaintyMs"),
+        "clockSamples": int(len(t1)),
+        "clockSamplesUsed": int(keep.sum()),
+        "clockSpanSeconds": span_s,
+        "minRttMs": float(np.min(rtt)),
+        "medianRttMs": float(np.median(rtt)),
+        "clockResidualRmsMs": float(np.sqrt(np.mean(res ** 2))),
+        "clockDriftPPM": float(g * 1e6),
+    }
 
 
 def render(cam, master, master_dur, out_path, size="1920:1080", fps=30, crf_args=None):
     """Kamera na vremensku crtu miksa: frame u t_k ide na a + b·t_k − av."""
-    a, b = cam["offsetSeconds"] - cam.get("avOffsetMs", 0.0) / 1000.0, cam["scale"]
+    a = float(cam["offsetSeconds"] - cam.get("avOffsetMs", 0.0) / 1000.0)
+    b = float(cam["scale"])
     w, h = size.split(":")
     vf = (f"[1:v]setpts=(PTS-STARTPTS)*{b!r}+({a!r})/TB,trim=start=0,setpts=PTS,"
           f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2[cam];"
           f"[0:v][cam]overlay=eof_action=pass:repeatlast=0,fps={fps}[v]")
+    if master is not None:
+        audio_in, audio_map = ["-i", str(master)], "2:a"
+    else:
+        # Bez miksa (stadion): kamera nosi svoj zvuk, rastegnut i pomaknut isto
+        # kao slika. asetrate prima samo cijele Hz (preslab za ppm), pa se
+        # timestampovi skaliraju za b, a aresample meko rasteže zvuk prema njima
+        # (izmjereno: stalni zaostatak ~1 ms, ne raste s duljinom).
+        sr = 48000
+        shift = (f"adelay={a * 1000:.3f}:all=1" if a >= 0
+                 else f"atrim=start={-a:.6f},asetpts=PTS-STARTPTS")
+        vf += (f";[1:a]aresample={sr},asetpts=(PTS-STARTPTS)*{b!r},"
+               f"aresample={sr}:min_comp=0.001:min_hard_comp=1:max_soft_comp=0.01:first_pts=0,"
+               f"{shift},apad=whole_dur={master_dur:.3f}[a]")
+        audio_in, audio_map = [], "[a]"
     cmd = ["ffmpeg", "-v", "error", "-stats", "-y",
            "-f", "lavfi", "-i", f"color=black:s={w}x{h}:r={fps}:d={master_dur:.3f}",
-           "-i", cam["file"], "-i", str(master),
-           "-filter_complex", vf, "-map", "[v]", "-map", "2:a",
+           "-i", cam["file"], *audio_in,
+           "-filter_complex", vf, "-map", "[v]", "-map", audio_map,
            *(crf_args or ["-c:v", "hevc_videotoolbox", "-q:v", "65", "-tag:v", "hvc1"]),
            "-c:a", "aac", "-b:a", "256k", "-t", f"{master_dur:.3f}", str(out_path)]
     subprocess.run(cmd, check=True)
@@ -298,61 +398,117 @@ def grid(rendered, master, out_path):
     else:
         cells = "|".join(f"{(i % cols) * 640}_{(i // cols) * 360}" for i in range(n))
         layout = "".join(f"[g{i}]" for i in range(n)) + f"xstack=inputs={n}:layout={cells}:fill=black[v]"
-    cmd = ["ffmpeg", "-v", "error", "-stats", "-y", *inputs, "-i", str(master),
+    # Bez miksa: svi renderi već nose zvuk poravnat na istu crtu, uzmi prvi.
+    audio = ["-i", str(master)] if master is not None else []
+    cmd = ["ffmpeg", "-v", "error", "-stats", "-y", *inputs, *audio,
            "-filter_complex", ";".join(chains) + ";" + layout,
-           "-map", "[v]", "-map", f"{n}:a", "-c:v", "h264_videotoolbox", "-b:v", "6M",
+           "-map", "[v]", "-map", f"{n}:a" if master is not None else "0:a", "-c:v", "h264_videotoolbox", "-b:v", "6M",
            "-c:a", "aac", "-shortest", str(out_path)]
     subprocess.run(cmd, check=True)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--master", required=True, help="glavni miks (wav ili bilo što što ffmpeg čita)")
+    ap.add_argument("--master", help="glavni miks (wav ili bilo što što ffmpeg čita); bez njega --sync clock")
     ap.add_argument("--cameras", nargs="+", required=True, help="video datoteke ili mape (npr. izlaz director.mjs pull)")
-    ap.add_argument("--out", default=None, help="izlazna mapa (zadano: uz miks, multicam_synced/)")
-    ap.add_argument("--render", action="store_true", help="izvezi svaku kameru poravnatu na miks")
+    ap.add_argument("--sync", choices=("auto", "audio", "clock"), default="auto",
+                    help="audio: korelacija s miksom (studio); clock: sat relaya iz sidecara (stadion, "
+                         "kamere daleko jedna od druge); auto: audio ako je dan --master, inače clock")
+    ap.add_argument("--out", default=None, help="izlazna mapa (zadano: uz miks / uz prvu kameru, multicam_synced/)")
+    ap.add_argument("--render", action="store_true", help="izvezi svaku kameru poravnatu na zajedničku crtu")
     ap.add_argument("--grid", action="store_true", help="mreža svih kamera za provjeru (traži --render)")
     ap.add_argument("--av-offset", action="append", default=[], metavar="IME=MS",
                     help="kamerin vlastiti A/V pomak iz pljeska: + znači slika kasni za svojim zvukom")
     args = ap.parse_args()
 
-    master = Path(args.master)
-    out = Path(args.out) if args.out else master.parent / "multicam_synced"
-    out.mkdir(parents=True, exist_ok=True)
-    av = {k: float(v) for k, v in (x.split("=", 1) for x in args.av_offset)}
-
-    master_dur = float(probe(master)["format"]["duration"])
-    log(f"🎚  Miks: {master} ({master_dur:.1f} s)")
-    master_fine = bandpass(load_audio(master, FINE_SR), FINE_SR)
-    master_coarse = bandpass(load_audio(master, COARSE_SR), COARSE_SR)
+    mode = args.sync if args.sync != "auto" else ("audio" if args.master else "clock")
+    if mode == "audio" and not args.master:
+        sys.exit("❌ --sync audio traži --master.")
+    master = Path(args.master) if args.master and mode == "audio" else None
+    if args.master and mode == "clock":
+        log("ℹ️  --sync clock: miks nema sat relaya pa se ne koristi; zvuk renderâ je zvuk svake kamere.")
 
     cameras = find_cameras(args.cameras)
     if not cameras:
         sys.exit("❌ Nema video datoteka.")
+    out = Path(args.out) if args.out else (master.parent if master else cameras[0][1].parent.parent) / "multicam_synced"
+    out.mkdir(parents=True, exist_ok=True)
+    av = {k: float(v) for k, v in (x.split("=", 1) for x in args.av_offset)}
+
+    # Sat se računa uvijek kad ga sidecar ima: u clock načinu je to poravnanje,
+    # u audio načinu neovisna provjera — dvije metode koje se moraju složiti.
+    clocks = {}
+    for name, path, meta in cameras:
+        fit = clock_fit(meta)
+        if fit:
+            clocks[name] = fit
 
     results, failed = {}, []
-    for name, path in cameras:
-        log(f"📱 {name}: {path.name}")
-        try:
-            r = sync_camera(path, master_fine, master_coarse, master_dur)
-        except Exception as e:
-            log(f"   ❌ {e}")
-            failed.append(name)
-            continue
-        r["avOffsetMs"] = av.get(name, 0.0)
-        results[name] = r
-        flag = "✅" if r["residualRmsMs"] < 2 and r["medianPSR"] > 15 else "⚠️ "
-        log(f"   {flag} pomak {r['offsetSeconds']:+.4f} s · drift {r['driftPPM']:+.1f} ppm "
-            f"({r['driftOverTakeMs']:+.1f} ms kroz snimku) · rezidual {r['residualRmsMs']:.2f} ms RMS, "
-            f"max {r['residualMaxMs']:.2f} · {r['windowsUsed']}/{r['windows']} prozora · PSR {r['medianPSR']:.0f}")
-        if abs(r["halfWalkMs"]) > 3:
-            log(f"   ⚠️  drift nije linearan: druga polovica odstupa {r['halfWalkMs']:+.1f} ms")
-        if name not in av:
-            log("   ℹ️  bez --av-offset: pretpostavljam da je slika telefona poravnata s njegovim zvukom")
+    if mode == "audio":
+        master_dur = float(probe(master)["format"]["duration"])
+        log(f"🎚  Miks: {master} ({master_dur:.1f} s)")
+        master_fine = bandpass(load_audio(master, FINE_SR), FINE_SR)
+        master_coarse = bandpass(load_audio(master, COARSE_SR), COARSE_SR)
+        for name, path, meta in cameras:
+            log(f"📱 {name}: {path.name}")
+            try:
+                r = sync_camera(path, master_fine, master_coarse, master_dur)
+            except Exception as e:
+                log(f"   ❌ {e}")
+                failed.append(name)
+                continue
+            r["method"] = "audio"
+            r["avOffsetMs"] = av.get(name, 0.0)
+            results[name] = r
+            flag = "✅" if r["residualRmsMs"] < 2 and r["medianPSR"] > 15 else "⚠️ "
+            log(f"   {flag} pomak {r['offsetSeconds']:+.4f} s · drift {r['driftPPM']:+.1f} ppm "
+                f"({r['driftOverTakeMs']:+.1f} ms kroz snimku) · rezidual {r['residualRmsMs']:.2f} ms RMS, "
+                f"max {r['residualMaxMs']:.2f} · {r['windowsUsed']}/{r['windows']} prozora · PSR {r['medianPSR']:.0f}")
+            if abs(r["halfWalkMs"]) > 3:
+                log(f"   ⚠️  drift nije linearan: druga polovica odstupa {r['halfWalkMs']:+.1f} ms")
+            if name not in av:
+                log("   ℹ️  bez --av-offset: pretpostavljam da je slika telefona poravnata s njegovim zvukom")
+        # Provjera satom: razlika (audio pomak − sat pomak) mora biti ista za sve kamere.
+        both = [n for n in results if n in clocks]
+        if len(both) >= 2:
+            d = {n: results[n]["offsetSeconds"] - clocks[n][0] for n in both}
+            ref = float(np.median(list(d.values())))
+            log("⏱  Sat relaya prema zvuku (iste kamere, neovisna metoda):")
+            for n in both:
+                results[n]["clockVsAudioMs"] = (d[n] - ref) * 1000
+                results[n].update(clocks[n][2])
+                log(f"   {n}: {results[n]['clockVsAudioMs']:+.1f} ms "
+                    f"(RTT min {clocks[n][2]['minRttMs']:.0f} ms, {clocks[n][2]['clockSamplesUsed']} uzoraka)")
+    else:
+        missing = [n for n, _, _ in cameras if n not in clocks]
+        for n in missing:
+            log(f"📱 {n}: ❌ sidecar nema blok clock (v2) — ne može se poravnati po satu")
+            failed.append(n)
+        if not clocks:
+            sys.exit("❌ Nijedna kamera nema podatke o satu.")
+        t0 = min(a for a, _, _ in clocks.values())
+        for name, path, meta in cameras:
+            if name not in clocks:
+                continue
+            a, b, info = clocks[name]
+            dur = float(probe(path)["format"]["duration"])
+            r = {"file": str(path), "method": "clock", "durationSeconds": dur,
+                 "offsetSeconds": float(a - t0), "scale": float(b), "driftPPM": float((b - 1) * 1e6),
+                 "serverStartMs": float(a * 1000), "avOffsetMs": av.get(name, 0.0), **info}
+            results[name] = r
+            unc = math.hypot(info["clockResidualRmsMs"], info["fileZeroUncertaintyMs"] or 0.0)
+            flag = "✅" if info["clockSamplesUsed"] >= 4 and unc < 15 else "⚠️ "
+            log(f"📱 {name}: {flag} počinje {r['offsetSeconds']:+.3f} s · sat {info['clockDriftPPM']:+.1f} ppm · "
+                f"{info['clockSamplesUsed']}/{info['clockSamples']} uzoraka, RTT min {info['minRttMs']:.0f} ms · "
+                f"rasipanje uzoraka {unc:.1f} ms")
+            if info["clockSamplesUsed"] < 4:
+                log("   ⚠️  premalo uzoraka sata kroz snimku — drift nije izmjeren, samo pomak")
+        master_dur = max(r["offsetSeconds"] + r["scale"] * r["durationSeconds"] for r in results.values())
 
     (out / "multicam_sync.json").write_text(json.dumps(
-        {"version": 1, "master": str(master), "masterDurationSeconds": master_dur,
-         "model": "t_master = offsetSeconds + scale * t_camera - avOffsetMs/1000",
+        {"version": 2, "method": mode, "master": str(master) if master else None,
+         "masterDurationSeconds": master_dur,
+         "model": "t_timeline = offsetSeconds + scale * t_camera - avOffsetMs/1000",
          "cameras": results, "failed": failed}, indent=2, ensure_ascii=False))
     log(f"📝 {out / 'multicam_sync.json'}")
 

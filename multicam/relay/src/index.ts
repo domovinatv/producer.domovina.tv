@@ -107,7 +107,12 @@ interface Take {
 	sessionId: string;
 	takeId: string;
 	startedAt: number;
+	/** Server time (ms) at which every camera should begin, so a start is not
+	 * staggered by each phone's network latency. Late phones start immediately. */
+	startAtServerMs: number;
 }
+
+const START_LEAD_MS = 2000;
 
 // One room = one studio. Hibernatable sockets: the object sleeps between messages,
 // and each socket's identity lives in its attachment so it survives eviction.
@@ -129,7 +134,12 @@ export class Room extends DurableObject<Env> {
 
 		const take = await this.take();
 		if (role === "director") this.send(pair[1], await this.roster());
-		if (role === "camera" && take) this.send(pair[1], { type: "start", ...take });
+		if (role === "camera") {
+			// The full state, not only "start": a phone that was offline when the
+			// take was stopped learns it here and stops, instead of recording on.
+			this.send(pair[1], { type: "state", take: take ?? null });
+			if (take) this.send(pair[1], { type: "start", ...take });
+		}
 		return new Response(null, { status: 101, webSocket: pair[0] });
 	}
 
@@ -171,7 +181,14 @@ export class Room extends DurableObject<Env> {
 		ws.serializeAttachment(peer);
 		switch (msg.type) {
 			case "start": {
-				const take: Take = { sessionId: String(msg.sessionId), takeId: String(msg.takeId), startedAt: Date.now() };
+				const now = Date.now();
+				const at = Number(msg.atServerMs);
+				const take: Take = {
+					sessionId: String(msg.sessionId),
+					takeId: String(msg.takeId),
+					startedAt: now,
+					startAtServerMs: Number.isFinite(at) && at > now ? at : now + START_LEAD_MS,
+				};
 				if (!msg.target) await this.ctx.storage.put("take", take);
 				this.toCameras({ type: "start", ...take }, msg.target);
 				break;
@@ -179,6 +196,7 @@ export class Room extends DurableObject<Env> {
 			case "stop":
 				if (!msg.target) await this.ctx.storage.delete("take");
 				this.toCameras({ type: "stop", takeId: msg.takeId }, msg.target);
+				if (!msg.target) this.toCameras({ type: "state", take: null });
 				break;
 		}
 		this.toDirectors(await this.roster());
