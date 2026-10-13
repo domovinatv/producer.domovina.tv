@@ -64,6 +64,8 @@ final class StudioViewModel: ObservableObject {
     @Published var r2Status: String?
 
     let videoController = VideoCaptureController()
+    /// Telefoni-kamere preko relaya; Snimaj/Zaustavi ih pokreću i zaustavljaju.
+    let multicam = MulticamDirector()
     private let lipSyncMonitor = LipSyncMonitor()
     private let healthMonitor = HealthMonitor()
     private let lipSyncQueue = DispatchQueue(label: "tv.domovina.studio.lipsync", qos: .utility)
@@ -87,6 +89,16 @@ final class StudioViewModel: ObservableObject {
         restoreSelections()
         refreshDevices()
         startTimers()
+
+        // Telefon javi upload i minutama nakon stopa — zato u dnevnik zadnje
+        // sesije, ne samo dok traje snimanje.
+        multicam.onEvent = { [weak self] message, level in
+            guard let self else { return }
+            if let store = self.store {
+                store.log(message, level: level)
+                self.recentEvents = Array(store.snapshot().events.suffix(40).reversed())
+            }
+        }
 
         deviceListener = AudioDeviceEnumerator.addDeviceListListener(queue: .main) { [weak self] in
             Task { @MainActor in self?.handleDeviceListChanged() }
@@ -455,6 +467,9 @@ final class StudioViewModel: ObservableObject {
 
             try startMicrophones(store: newStore, queue: queue)
             let videoStarted = startVideo(store: newStore, queue: queue)
+            // Tek kad mikrofoni sigurno rade: telefoni su dodatak, ne smiju
+            // krenuti za take koji se nije ni pokrenuo.
+            multicam.start(sessionID: newStore.snapshot().sessionID)
 
             isRecording = true
             elapsedSeconds = 0
@@ -640,6 +655,7 @@ final class StudioViewModel: ObservableObject {
         let store = self.store
         let stopHostNanos = HostClock.now()
 
+        if let sessionID = store?.snapshot().sessionID { multicam.stop(sessionID: sessionID) }
         let finalSnapshots = await teardownRecorders()
 
         store?.mutate { $0.stoppedAtHostNanos = stopHostNanos }

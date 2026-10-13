@@ -152,6 +152,10 @@ struct PostProcessView: View {
             if let manifest {
                 manifestSummary(manifest)
                 Divider()
+                if let manifestFolder, MulticamConfigurationStore.load().isUsable {
+                    MulticamPostSection(sessionID: manifest.sessionID, sessionFolder: manifestFolder)
+                    Divider()
+                }
                 syncPreviewSection(manifest)
                 Divider()
                 lumixSection

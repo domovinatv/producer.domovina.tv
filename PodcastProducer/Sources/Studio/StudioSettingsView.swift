@@ -21,6 +21,7 @@ struct StudioSettingsView: View {
                 Text("Uređaji").tag(0)
                 Text("Snimanje").tag(1)
                 Text("Cloudflare R2").tag(2)
+                Text("Telefoni").tag(3)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -33,7 +34,8 @@ struct StudioSettingsView: View {
                     switch selectedTab {
                     case 0: devicesTab
                     case 1: recordingTab
-                    default: r2Tab
+                    case 2: r2Tab
+                    default: MulticamSettingsView(director: model.multicam)
                     }
                 }
                 .padding(20)

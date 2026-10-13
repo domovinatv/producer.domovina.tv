@@ -37,6 +37,10 @@ struct StudioView: View {
                 Divider()
                 microphoneSection
                 Divider()
+                if model.multicam.isActive {
+                    MulticamPanelView(director: model.multicam, isRecording: model.isRecording)
+                    Divider()
+                }
                 SyncMeterView(reading: model.lipSync, hasVideo: model.isPreviewing,
                               calibrationMilliseconds: model.cameraAVOffsetMilliseconds)
                 HealthPanelView(report: model.health)
@@ -59,7 +63,7 @@ struct StudioView: View {
                     Image(systemName: "gearshape")
                 }
                 .buttonStyle(.borderless)
-                .help("Postavke: uređaji, kodek, Cloudflare R2")
+                .help("Postavke: uređaji, kodek, Cloudflare R2, telefoni")
             }
 
             TextField("Naziv epizode", text: $model.sessionTitle)
