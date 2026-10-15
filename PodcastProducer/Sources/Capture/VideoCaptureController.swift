@@ -1,0 +1,691 @@
+import Foundation
+import AVFoundation
+import CoreMedia
+import UniformTypeIdentifiers
+
+/// Captures the Lumix GH5 over the Elgato 4K X (a class-compliant UVC device,
+/// so no vendor driver is involved) and writes two things at once:
+///
+/// 1. `master` — a local high-quality proxy in a `.mov`, written with a movie
+///    fragment interval so a crash still leaves a playable file.
+/// 2. `segments` — low-bitrate fragmented MP4 chunks handed straight to the R2
+///    uploader, so an off-site copy exists while you are still recording.
+///
+/// The camera's own SD-card recording remains the real master; this capture is
+/// the timing reference that lets post align it exactly.
+final class VideoCaptureController: NSObject {
+
+    enum CaptureError: LocalizedError {
+        case noVideoDevice
+        case cannotAddInput(String)
+        case writerSetupFailed(String)
+        case permissionDenied(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noVideoDevice: return "Odabrani video uređaj više nije dostupan. Provjeri USB kabel, pa u postavkama osvježi popis i odaberi ulaz ponovno."
+            case .cannotAddInput(let name): return "Ne mogu dodati ulaz u capture sesiju: \(name)"
+            case .writerSetupFailed(let reason): return "Priprema snimanja videa nije uspjela: \(reason)"
+            case .permissionDenied(let kind): return "macOS je odbio pristup \(kind). Postavke → Privatnost i sigurnost."
+            }
+        }
+    }
+
+    enum MasterCodec: String, CaseIterable, Identifiable {
+        case hevc
+        case proRes422Proxy
+        case proRes422LT
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .hevc: return "HEVC (najmanji fajl)"
+            case .proRes422Proxy: return "ProRes 422 Proxy (hardverski)"
+            case .proRes422LT: return "ProRes 422 LT (najbolji proxy)"
+            }
+        }
+
+        var avCodec: AVVideoCodecType {
+            switch self {
+            case .hevc: return .hevc
+            case .proRes422Proxy: return .proRes422Proxy
+            case .proRes422LT: return .proRes422LT
+            }
+        }
+
+        /// Roughly how much disk an hour of this codec costs at a given capture
+        /// format.
+        ///
+        /// This used to be one flat number per codec, quietly assuming 1080p.
+        /// On a 4K30 take the real cost is ~27 GB/h against the 9 GB/h it
+        /// claimed, so the pre-flight and the "hours left" readout were both
+        /// three times too optimistic — on a 526 GB disk that is the difference
+        /// between "238 h" and 19 h.
+        ///
+        /// HEVC reuses the very bitrate ladder the encoder is configured with,
+        /// so the estimate cannot drift away from what actually gets written.
+        /// ProRes has no rate control at all: its data rate is proportional to
+        /// pixels and frame rate, anchored on Apple's published 1080p30 figures.
+        func approximateGigabytesPerHour(width: Int, height: Int, frameRate: Double) -> Double {
+            // Fall back to 1080p30 only when the session has not reported a
+            // format yet — the same size the old constants silently assumed.
+            let pixels = width > 0 && height > 0 ? width * height : 1920 * 1080
+            let rate = frameRate > 0 ? frameRate : 30
+
+            switch self {
+            case .hevc:
+                let bitsPerHour = Double(VideoCaptureController.bitrate(forPixels: pixels)) * 3600
+                return bitsPerHour / 8 / 1_000_000_000
+            case .proRes422Proxy, .proRes422LT:
+                let scale = Double(pixels) / (1920.0 * 1080.0) * rate / 30.0
+                return (self == .proRes422Proxy ? 20.0 : 45.0) * scale
+            }
+        }
+    }
+
+    struct Status {
+        var isSessionRunning = false
+        var isRecording = false
+        var videoFrameCount: UInt64 = 0
+        var audioFrameCount: UInt64 = 0
+        var droppedFrameCount: UInt64 = 0
+        var firstVideoHostNanos: UInt64?
+        var lastVideoHostNanos: UInt64?
+        var width = 0
+        var height = 0
+        var nominalFrameRate: Double = 0
+        var segmentsWritten = 0
+        var lastError: String?
+
+        /// Frame arrivals across the whole capture session, independent of
+        /// whether a take is running. `videoFrameCount` resets when recording
+        /// starts; these do not, so the delivered rate is known from the moment
+        /// preview comes up — which is exactly when the disk pre-flight asks.
+        var sessionVideoFrameCount: UInt64 = 0
+        var sessionFirstFrameHostNanos: UInt64?
+        var sessionLastFrameHostNanos: UInt64?
+
+        /// The frame rate the camera is actually sending, measured against the
+        /// host clock.
+        ///
+        /// `nominalFrameRate` describes what the *capture device's* active
+        /// format can do: the Elgato 4K X advertises 120 fps on 3840×2160 while
+        /// a GH5 feeds it 29.97, and which of the two it reports is not even
+        /// stable between runs. Only this number describes the signal.
+        var measuredFrameRate: Double? {
+            guard let first = sessionFirstFrameHostNanos,
+                  let last = sessionLastFrameHostNanos,
+                  last > first, sessionVideoFrameCount > 1 else { return nil }
+            // Intervals, not frames: N frames span N−1 gaps between the first
+            // and last timestamp. Counting them as N inflates short measurements.
+            return Double(sessionVideoFrameCount - 1) / (Double(last - first) / 1_000_000_000.0)
+        }
+    }
+
+    // MARK: - Configuration
+
+    var masterCodec: MasterCodec = .hevc
+    /// Bitrate for the chunks that stream to R2 while recording. 3 Mbps at
+    /// 1080p is watchable and fits comfortably on a normal upload link.
+    var uploadTierBitrate = 3_000_000
+    var uploadSegmentSeconds: Double = 6
+    var maxCaptureHeight = 2160
+
+    /// Fired on the writer queue when an fMP4 chunk is ready to upload.
+    /// The `isInitialization` flag marks the very first chunk, which carries the
+    /// moov box: without it the media chunks are undecodable, so recovery has to
+    /// know which one it is.
+    var onSegmentReady: ((Data, Int, UInt64, Bool) -> Void)?
+    /// Mono camera-side samples for the lip-sync correlator.
+    var onMonitorSamples: ((UnsafePointer<Float>, Int, Double, UInt64) -> Void)?
+
+    let session = AVCaptureSession()
+
+    private let sessionQueue = DispatchQueue(label: "tv.domovina.studio.capture.session")
+    private let videoQueue = DispatchQueue(label: "tv.domovina.studio.capture.video", qos: .userInitiated)
+    private let audioQueue = DispatchQueue(label: "tv.domovina.studio.capture.audio", qos: .userInitiated)
+    private let writerQueue = DispatchQueue(label: "tv.domovina.studio.capture.writer", qos: .userInitiated)
+    private let stateLock = NSLock()
+
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let audioOutput = AVCaptureAudioDataOutput()
+    private var videoInput: AVCaptureDeviceInput?
+    private var audioInput: AVCaptureDeviceInput?
+
+    private var masterWriter: AVAssetWriter?
+    private var masterVideoInput: AVAssetWriterInput?
+    private var masterAudioInput: AVAssetWriterInput?
+
+    private var segmentWriter: AVAssetWriter?
+    private var segmentVideoInput: AVAssetWriterInput?
+    private var segmentAudioInput: AVAssetWriterInput?
+    private var segmentIndex = 0
+    private var segmentStartHostNanos: UInt64 = 0
+
+    private var sessionStarted = false
+    private var masterURL: URL?
+    private var status = Status()
+    private var monitorScratch = [Float](repeating: 0, count: 16384)
+
+    func snapshot() -> Status {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return status
+    }
+
+    var masterFileURL: URL? { masterURL }
+
+    // MARK: - Device discovery
+
+    static func videoDevices() -> [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.external, .builtInWideAngleCamera],
+            mediaType: .video,
+            position: .unspecified
+        ).devices
+    }
+
+    static func audioDevices() -> [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
+    }
+
+    static func requestPermissions() async throws {
+        if AVCaptureDevice.authorizationStatus(for: .video) != .authorized {
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                throw CaptureError.permissionDenied("kameri")
+            }
+        }
+        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+            guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                throw CaptureError.permissionDenied("mikrofonu")
+            }
+        }
+    }
+
+    // MARK: - Session lifecycle
+
+    /// Attaches a preview layer to the session.
+    ///
+    /// Must go through `sessionQueue` like everything else that touches the
+    /// session. Assigning `previewLayer.session` mutates the session's internal
+    /// collections, and doing that from the main thread while `startRunning()`
+    /// was enumerating them on this queue crashed the app outright
+    /// (`__NSFastEnumerationMutationHandler`). SwiftUI creates the view whenever
+    /// it likes, so the ordering cannot be arranged — it has to be serialised.
+    func attachPreview(to layer: AVCaptureVideoPreviewLayer) {
+        sessionQueue.async { [session] in
+            if layer.session !== session { layer.session = session }
+        }
+    }
+
+    /// Async because the whole thing now runs on `sessionQueue`. Doing it
+    /// synchronously would mean blocking the main thread for as long as a 4K
+    /// UVC device takes to come up, which is roughly a second of frozen UI.
+    func startSession(videoDeviceID: String, audioDeviceID: String?) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sessionQueue.async {
+                do {
+                    try self.configureAndStart(videoDeviceID: videoDeviceID, audioDeviceID: audioDeviceID)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func configureAndStart(videoDeviceID: String, audioDeviceID: String?) throws {
+        guard let videoDevice = AVCaptureDevice(uniqueID: videoDeviceID) else {
+            throw CaptureError.noVideoDevice
+        }
+
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+
+        for input in session.inputs { session.removeInput(input) }
+        for output in session.outputs { session.removeOutput(output) }
+
+        configureBestFormat(on: videoDevice)
+
+        let newVideoInput = try AVCaptureDeviceInput(device: videoDevice)
+        guard session.canAddInput(newVideoInput) else { throw CaptureError.cannotAddInput(videoDevice.localizedName) }
+        session.addInput(newVideoInput)
+        videoInput = newVideoInput
+
+        if let audioDeviceID, let audioDevice = AVCaptureDevice(uniqueID: audioDeviceID) {
+            let newAudioInput = try AVCaptureDeviceInput(device: audioDevice)
+            if session.canAddInput(newAudioInput) {
+                session.addInput(newAudioInput)
+                audioInput = newAudioInput
+            }
+        }
+
+        // Keeping late frames means we never silently drop footage; the encode
+        // path is hardware-backed so appends stay well ahead of capture.
+        videoOutput.alwaysDiscardsLateVideoFrames = false
+        videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
+        guard session.canAddOutput(videoOutput) else { throw CaptureError.cannotAddInput("video output") }
+        session.addOutput(videoOutput)
+
+        audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
+        if session.canAddOutput(audioOutput) {
+            session.addOutput(audioOutput)
+        }
+
+        let dimensions = CMVideoFormatDescriptionGetDimensions(videoDevice.activeFormat.formatDescription)
+        let frameRate = 1.0 / CMTimeGetSeconds(videoDevice.activeVideoMinFrameDuration)
+
+        stateLock.lock()
+        status.width = Int(dimensions.width)
+        status.height = Int(dimensions.height)
+        status.nominalFrameRate = frameRate.isFinite ? frameRate : 0
+        status.sessionVideoFrameCount = 0
+        status.sessionFirstFrameHostNanos = nil
+        status.sessionLastFrameHostNanos = nil
+        stateLock.unlock()
+
+        // Already on `sessionQueue`, and `commitConfiguration()` runs via the
+        // `defer` above — before this, because the defer fires when the enclosing
+        // scope exits. Starting the session from a *different* queue while that
+        // configuration was still open is what made this racy in the first place.
+        session.commitConfiguration()
+        if !session.isRunning { session.startRunning() }
+
+        stateLock.lock()
+        status.isSessionRunning = session.isRunning
+        stateLock.unlock()
+    }
+
+    func stopSession() {
+        sessionQueue.async { [session] in
+            if session.isRunning { session.stopRunning() }
+        }
+        stateLock.lock()
+        status.isSessionRunning = false
+        stateLock.unlock()
+    }
+
+    /// Picks the largest format under the configured height cap, preferring the
+    /// highest frame rate available at that size.
+    private func configureBestFormat(on device: AVCaptureDevice) {
+        let candidates = device.formats.filter { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return Int(dimensions.height) <= maxCaptureHeight
+        }
+        guard let best = candidates.max(by: { lhs, rhs in
+            let l = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
+            let r = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
+            let lPixels = Int(l.width) * Int(l.height)
+            let rPixels = Int(r.width) * Int(r.height)
+            if lPixels != rPixels { return lPixels < rPixels }
+            let lFPS = lhs.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+            let rFPS = rhs.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+            return lFPS < rFPS
+        }) else { return }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = best
+            device.unlockForConfiguration()
+        } catch {
+            stateLock.lock()
+            status.lastError = "Ne mogu zaključati format uređaja: \(error.localizedDescription)"
+            stateLock.unlock()
+        }
+    }
+
+    // MARK: - Recording
+
+    func startRecording(masterURL url: URL) throws {
+        try writerQueue.sync {
+            try setUpMasterWriter(url: url)
+            setUpSegmentWriter()
+            sessionStarted = false
+            segmentIndex = 0
+            masterURL = url
+        }
+        stateLock.lock()
+        status.isRecording = true
+        status.videoFrameCount = 0
+        status.audioFrameCount = 0
+        status.droppedFrameCount = 0
+        status.firstVideoHostNanos = nil
+        stateLock.unlock()
+    }
+
+    func stopRecording() async {
+        let master = writerQueue.sync { () -> AVAssetWriter? in
+            masterVideoInput?.markAsFinished()
+            masterAudioInput?.markAsFinished()
+            segmentVideoInput?.markAsFinished()
+            segmentAudioInput?.markAsFinished()
+            return masterWriter
+        }
+
+        if let segmentWriter, segmentWriter.status == .writing {
+            await segmentWriter.finishWriting()
+        }
+        if let master, master.status == .writing {
+            await master.finishWriting()
+        }
+
+        writerQueue.sync {
+            masterWriter = nil
+            masterVideoInput = nil
+            masterAudioInput = nil
+            segmentWriter = nil
+            segmentVideoInput = nil
+            segmentAudioInput = nil
+        }
+
+        markRecordingStopped()
+    }
+
+    /// Locking is kept out of the async context on purpose — NSLock is not
+    /// safe to hold across a suspension point.
+    private func markRecordingStopped() {
+        stateLock.lock()
+        status.isRecording = false
+        stateLock.unlock()
+    }
+
+    private func setUpMasterWriter(url: URL) throws {
+        let writer: AVAssetWriter
+        do {
+            writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        } catch {
+            throw CaptureError.writerSetupFailed(error.localizedDescription)
+        }
+
+        // With fragments on disk every two seconds, a hard crash costs at most
+        // the last fragment instead of the whole take.
+        writer.movieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
+        writer.shouldOptimizeForNetworkUse = false
+
+        let dimensions = currentDimensions()
+        var videoSettings: [String: Any] = [
+            AVVideoCodecKey: masterCodec.avCodec,
+            AVVideoWidthKey: dimensions.width,
+            AVVideoHeightKey: dimensions.height
+        ]
+        if masterCodec == .hevc {
+            videoSettings[AVVideoCompressionPropertiesKey] = [
+                AVVideoAverageBitRateKey: Self.bitrate(forPixels: dimensions.width * dimensions.height),
+                AVVideoExpectedSourceFrameRateKey: Int(snapshot().nominalFrameRate.rounded())
+            ]
+        }
+
+        let videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoWriterInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(videoWriterInput) else {
+            throw CaptureError.writerSetupFailed("kodek \(masterCodec.displayName) nije prihvaćen")
+        }
+        writer.add(videoWriterInput)
+
+        let audioWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 48000,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 192_000
+        ])
+        audioWriterInput.expectsMediaDataInRealTime = true
+        if writer.canAdd(audioWriterInput) { writer.add(audioWriterInput) }
+
+        guard writer.startWriting() else {
+            throw CaptureError.writerSetupFailed(writer.error?.localizedDescription ?? "nepoznat razlog")
+        }
+
+        masterWriter = writer
+        masterVideoInput = videoWriterInput
+        masterAudioInput = audioWriterInput
+    }
+
+    /// Optional second writer. If it cannot be created we still record locally —
+    /// the cloud copy is a bonus, never a precondition for the take.
+    private func setUpSegmentWriter() {
+        let writer = AVAssetWriter(contentType: UTType.mpeg4Movie)
+        writer.outputFileTypeProfile = .mpeg4AppleHLS
+        writer.preferredOutputSegmentInterval = CMTime(seconds: uploadSegmentSeconds, preferredTimescale: 1)
+        writer.initialSegmentStartTime = .zero
+        writer.delegate = self
+
+        let dimensions = currentDimensions()
+        let videoWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.hevc,
+            AVVideoWidthKey: dimensions.width,
+            AVVideoHeightKey: dimensions.height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: uploadTierBitrate,
+                AVVideoExpectedSourceFrameRateKey: Int(snapshot().nominalFrameRate.rounded())
+            ]
+        ])
+        videoWriterInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(videoWriterInput) else { return }
+        writer.add(videoWriterInput)
+
+        let audioWriterInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 48000,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 96_000
+        ])
+        audioWriterInput.expectsMediaDataInRealTime = true
+        if writer.canAdd(audioWriterInput) { writer.add(audioWriterInput) }
+
+        guard writer.startWriting() else { return }
+
+        segmentWriter = writer
+        segmentVideoInput = videoWriterInput
+        segmentAudioInput = audioWriterInput
+    }
+
+    /// Falls back as a matched pair — mixing a real width with a default height
+    /// would hand the encoder a wrong aspect ratio.
+    private func currentDimensions() -> (width: Int, height: Int) {
+        let snapshot = self.snapshot()
+        guard snapshot.width > 0, snapshot.height > 0 else { return (1920, 1080) }
+        return (snapshot.width, snapshot.height)
+    }
+
+    /// Static and keyed on pixels so the disk estimate can quote the exact
+    /// number the encoder will be handed, instead of a second guess at it.
+    ///
+    /// Measured on a real 4K30 take from this studio, VMAF (4K model) against
+    /// the old 60 Mbit/s output:
+    ///
+    /// | bitrate | GB/h | VMAF  |
+    /// |---------|------|-------|
+    /// | 6       | 2.6  | 93.75 |
+    /// | 8       | 3.4  | 96.20 |
+    /// | **12**  | 5.1  | 97.43 |
+    /// | 20      | 8.6  | 98.36 |
+    /// | 30      | 12.8 | 98.66 |
+    ///
+    /// The curve is flat past 12: the next 8 Mbit/s buy 0.9 VMAF and the 10
+    /// after that buy 0.3, while every one of them costs disk for the whole
+    /// take. 60 Mbit/s was six times what this content needs — a locked-off
+    /// camera on two people talking is close to the easiest thing an encoder
+    /// will ever see, and almost all of those bits were going into sensor noise.
+    ///
+    /// Worth remembering *what this file is*: the camera's own SD card holds the
+    /// master, and this capture is the timing reference that lets post align it,
+    /// plus a fallback if the card fails. At 12 Mbit/s it is still comfortably
+    /// publishable on its own — Riverside ships 4K at roughly 9.
+    static func bitrate(forPixels pixels: Int) -> Int {
+        // Two tiers rather than a bits-per-pixel formula: smaller frames need
+        // *more* bits per pixel for the same perceived quality, so a flat
+        // coefficient fitted at 4K would quietly starve 1080p.
+        pixels >= 3_000_000 ? 12_000_000 : 6_000_000
+    }
+}
+
+// MARK: - Sample buffer delegates
+
+extension VideoCaptureController: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let hostNanos = HostClock.nanos(fromCaptureTime: presentationTime)
+        let isVideo = output === videoOutput
+
+        if isVideo {
+            // Counted here rather than on the writer queue: the delivered frame
+            // rate is a property of the signal, not of whether we are recording.
+            stateLock.lock()
+            if status.sessionFirstFrameHostNanos == nil { status.sessionFirstFrameHostNanos = hostNanos }
+            status.sessionLastFrameHostNanos = hostNanos
+            status.sessionVideoFrameCount &+= 1
+            stateLock.unlock()
+        } else {
+            forwardAudioForMonitoring(sampleBuffer, hostNanos: hostNanos)
+        }
+
+        writerQueue.async { [weak self] in
+            guard let self, let writer = self.masterWriter, writer.status == .writing else { return }
+
+            // The session start time is taken from the first video frame so the
+            // master and the upload segments share one timeline.
+            if !self.sessionStarted {
+                guard isVideo else { return }
+                writer.startSession(atSourceTime: presentationTime)
+                self.segmentWriter?.startSession(atSourceTime: presentationTime)
+                self.segmentStartHostNanos = hostNanos
+                self.sessionStarted = true
+                self.stateLock.lock()
+                self.status.firstVideoHostNanos = hostNanos
+                self.stateLock.unlock()
+            }
+
+            if isVideo {
+                if let input = self.masterVideoInput, input.isReadyForMoreMediaData {
+                    input.append(sampleBuffer)
+                }
+                if let input = self.segmentVideoInput, input.isReadyForMoreMediaData {
+                    input.append(sampleBuffer)
+                }
+                self.stateLock.lock()
+                self.status.videoFrameCount &+= 1
+                self.status.lastVideoHostNanos = hostNanos
+                if writer.status == .failed {
+                    self.status.lastError = writer.error?.localizedDescription
+                }
+                self.stateLock.unlock()
+            } else {
+                if let input = self.masterAudioInput, input.isReadyForMoreMediaData {
+                    input.append(sampleBuffer)
+                }
+                if let input = self.segmentAudioInput, input.isReadyForMoreMediaData {
+                    input.append(sampleBuffer)
+                }
+                self.stateLock.lock()
+                self.status.audioFrameCount &+= 1
+                self.stateLock.unlock()
+            }
+        }
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        stateLock.lock()
+        status.droppedFrameCount &+= 1
+        stateLock.unlock()
+    }
+
+    /// Pulls a mono float copy of the HDMI-embedded camera audio for the
+    /// lip-sync correlator without disturbing the recording path.
+    private func forwardAudioForMonitoring(_ sampleBuffer: CMSampleBuffer, hostNanos: UInt64) {
+        guard onMonitorSamples != nil,
+              let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else { return }
+
+        let asbd = streamDescription.pointee
+        guard asbd.mFormatID == kAudioFormatLinearPCM else { return }
+        let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0 else { return }
+
+        // Ask for the exact size first. This API validates `bufferListSize`
+        // against what the buffer actually needs and rejects anything that is
+        // not equal — an over-sized allocation fails with
+        // kCMSampleBufferError_ArrayTooSmall (−12737) exactly like an
+        // under-sized one, which reads as the opposite of what happened.
+        //
+        // Reserving room for 8 buffers, as this used to, therefore failed on
+        // every single sample buffer: interleaved stereo needs one buffer (24
+        // bytes) and we handed it 152. The correlator never received one
+        // camera sample, so the live lip-sync meter sat at 0.00 confidence and
+        // the manifest got no `syncMeasurements` — while the warning shown on
+        // stop blamed the camera's HDMI audio.
+        var listSize = 0
+        guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &listSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: nil
+        ) == noErr, listSize > 0 else { return }
+
+        let listMemory = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { listMemory.deallocate() }
+        let listPointer = listMemory.assumingMemoryBound(to: AudioBufferList.self)
+
+        // Held until the end of scope: it owns the memory `mData` points into.
+        var blockBuffer: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: listPointer,
+            bufferListSize: listSize,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr else { return }
+
+        let list = UnsafeMutableAudioBufferListPointer(listPointer)
+        guard let first = list.first, let data = first.mData else { return }
+
+        let channels = Int(first.mNumberChannels)
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let count = min(frameCount, monitorScratch.count)
+
+        if isFloat {
+            let samples = data.assumingMemoryBound(to: Float.self)
+            for index in 0..<count { monitorScratch[index] = samples[index * channels] }
+        } else if asbd.mBitsPerChannel == 16 {
+            let samples = data.assumingMemoryBound(to: Int16.self)
+            for index in 0..<count { monitorScratch[index] = Float(samples[index * channels]) / 32768.0 }
+        } else {
+            return
+        }
+
+        monitorScratch.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
+            onMonitorSamples?(base, count, asbd.mSampleRate, hostNanos)
+        }
+    }
+}
+
+// MARK: - Segment delegate
+
+extension VideoCaptureController: AVAssetWriterDelegate {
+
+    func assetWriter(_ writer: AVAssetWriter,
+                     didOutputSegmentData segmentData: Data,
+                     segmentType: AVAssetSegmentType,
+                     segmentReport: AVAssetSegmentReport?) {
+        let index = segmentIndex
+        segmentIndex += 1
+        stateLock.lock()
+        status.segmentsWritten = segmentIndex
+        stateLock.unlock()
+        onSegmentReady?(segmentData, index, segmentStartHostNanos, segmentType == .initialization)
+    }
+}

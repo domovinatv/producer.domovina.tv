@@ -1,0 +1,7 @@
+{
+  "name": "domovina-multicam-relay",
+  "private": true,
+  "type": "module",
+  "scripts": { "deploy": "wrangler deploy", "dev": "wrangler dev", "types": "wrangler types" },
+  "devDependencies": { "wrangler": "^4.40.0", "typescript": "^5.6.0" }
+}

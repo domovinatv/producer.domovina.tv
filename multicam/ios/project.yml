@@ -1,0 +1,82 @@
+# XcodeGen spec — izvor istine za DomovinaKamera.xcodeproj.
+# Regeneriraj projekt s:  xcodegen generate
+# .xcodeproj se NE commita (gitignoran); commita se ovaj project.yml.
+
+name: DomovinaKamera
+
+options:
+  bundleIdPrefix: tv.domovina
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: 6SCK58757K
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  DomovinaKamera:
+    type: application
+    platform: iOS
+    sources:
+      - path: DomovinaKamera
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.domovina.multicam
+        PRODUCT_NAME: DomovinaKamera
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: DomovinaKamera/Info.plist
+      properties:
+        CFBundleDisplayName: DOMOVINA Kamera
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSCameraUsageDescription: Kamera snima sliku za multicam snimanje podcasta.
+        NSMicrophoneUsageDescription: Mikrofon snima zvuk po kojem se kamere sinkroniziraju u postprodukciji.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleURLTypes:
+          - CFBundleURLName: tv.domovina.multicam
+            CFBundleURLSchemes:
+              - domovinacam
+
+  # Logic tests (no host app, no camera): clock math, take rules, the clock log,
+  # and the AVAssetWriter path fed with synthetic host-clock buffers.
+  #   xcodebuild test -project DomovinaKamera.xcodeproj -scheme DomovinaKamera \
+  #     -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath build
+  DomovinaKameraTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: DomovinaKameraTests
+      - path: DomovinaKamera/HostClock.swift
+      - path: DomovinaKamera/ClockMath.swift
+      - path: DomovinaKamera/ClockLog.swift
+      - path: DomovinaKamera/TakeWriter.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.domovina.multicam.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  DomovinaKamera:
+    build:
+      targets:
+        DomovinaKamera: all
+        DomovinaKameraTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - DomovinaKameraTests
